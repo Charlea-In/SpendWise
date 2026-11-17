@@ -1,0 +1,6 @@
+{
+  "name": "SpendWise",
+  "description": "A daily expense helper and personal budget assistant to track spending, manage daily allowances, and stay on top of financial goals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
