@@ -61,6 +61,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.R
+import com.example.data.AccountDepositEntity
 import com.example.data.AccountEntity
 import com.example.data.AccountTransferEntity
 import com.example.data.CommitmentEntity
@@ -71,12 +72,15 @@ import com.example.notifications.BankNotificationAccessHelper
 import com.example.ui.components.AccountEditorDialog
 import com.example.ui.components.AccountTransferSheet
 import com.example.ui.components.AddEditExpenseSheet
+import com.example.ui.components.AddFundsSheet
 import com.example.ui.components.BankMessageTestDialog
 import com.example.ui.components.CommitmentEditorSheet
 import com.example.ui.components.EditCategoryBudgetDialog
 import com.example.ui.components.EditMonthlyBudgetDialog
+import com.example.ui.components.GlobalLoadingIndicator
 import com.example.ui.components.GoogleSheetsSyncDialog
 import com.example.ui.components.PointsTrackerSheet
+import com.example.ui.components.TodayBalanceSourceDialog
 import com.example.ui.screens.ActivityScreen
 import com.example.ui.screens.BudgetScreen
 import com.example.ui.screens.InsightsScreen
@@ -140,7 +144,9 @@ private val Destinations = listOf(
 @Composable
 fun SpendWiseApp(
     viewModel: SpendWiseViewModel = viewModel(),
-    openLogSignal: Int = 0
+    openLogSignal: Int = 0,
+    voiceTriggerSignal: Int = 0,
+    externalExpensePrompt: Pair<Int, String>? = null
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val editorState by viewModel.editorState.collectAsStateWithLifecycle()
@@ -158,6 +164,9 @@ fun SpendWiseApp(
     var showTransferSheet by remember { mutableStateOf(false) }
     var editingTransfer by remember { mutableStateOf<AccountTransferEntity?>(null) }
     var transferInitialFrom by remember { mutableStateOf<String?>(null) }
+    var showAddFundsSheet by remember { mutableStateOf(false) }
+    var editingDeposit by remember { mutableStateOf<AccountDepositEntity?>(null) }
+    var depositInitialAccount by remember { mutableStateOf<String?>(null) }
     var showPointsSheet by remember { mutableStateOf(false) }
     var editingPointsAccount by remember { mutableStateOf<PointsAccountEntity?>(null) }
     var showCommitmentSheet by remember { mutableStateOf(false) }
@@ -165,6 +174,7 @@ fun SpendWiseApp(
     var initialCommitmentType by remember { mutableStateOf(CommitmentType.DEBT) }
     var editingCategoryLimit by remember { mutableStateOf<Pair<ExpenseCategory, Long>?>(null) }
     var showBankMessageDialog by remember { mutableStateOf(false) }
+    var showTodaySourceDialog by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -208,6 +218,21 @@ fun SpendWiseApp(
             }
             launchSingleTop = true
             restoreState = true
+        }
+    }
+
+    LaunchedEffect(voiceTriggerSignal) {
+        if (voiceTriggerSignal > 0) {
+            navigateTo(ROUTE_TODAY)
+        }
+    }
+
+    LaunchedEffect(externalExpensePrompt) {
+        val promptPair = externalExpensePrompt ?: return@LaunchedEffect
+        val text = promptPair.second.trim()
+        if (text.isNotBlank()) {
+            navigateTo(ROUTE_TODAY)
+            viewModel.submitNaturalLanguageExpense(text)
         }
     }
 
@@ -335,7 +360,7 @@ fun SpendWiseApp(
                                     showCommitmentSheet = true
                                 },
                                 onRecordCommitmentPayment = viewModel::recordCommitmentPayment,
-                                onEditMonthlyPlan = { showMonthlyBudgetDialog = true },
+                                onOpenTodaySourceDialog = { showTodaySourceDialog = true },
                                 onOpenSheetSyncDialog = {
                                     viewModel.clearSyncTestFeedback()
                                     showSheetSyncDialog = true
@@ -350,6 +375,11 @@ fun SpendWiseApp(
                                     editingAccount = acct
                                     showAccountDialog = true
                                 },
+                                onAddFundsClick = { acct ->
+                                    editingDeposit = null
+                                    depositInitialAccount = acct?.name ?: uiState.selectedTodayAccount
+                                    showAddFundsSheet = true
+                                },
                                 onTransferClick = {
                                     editingTransfer = null
                                     transferInitialFrom = uiState.selectedTodayAccount
@@ -361,6 +391,12 @@ fun SpendWiseApp(
                                     showTransferSheet = true
                                 },
                                 onDeleteTransfer = viewModel::deleteAccountTransfer,
+                                onEditDeposit = { deposit ->
+                                    editingDeposit = deposit
+                                    depositInitialAccount = null
+                                    showAddFundsSheet = true
+                                },
+                                onDeleteDeposit = viewModel::deleteAccountDeposit,
                                 onCreatePointsAccount = {
                                     editingPointsAccount = null
                                     showPointsSheet = true
@@ -380,7 +416,8 @@ fun SpendWiseApp(
                                 onEditDetectedCharge = viewModel::openDetectedChargeInEditor,
                                 onDismissDetectedCharge = viewModel::dismissDetectedCharge,
                                 onOpenBankMessageDialog = { showBankMessageDialog = true },
-                                onPermissionResult = { viewModel.refreshNotificationPermission() }
+                                onPermissionResult = { viewModel.refreshNotificationPermission() },
+                                voiceTriggerSignal = voiceTriggerSignal
                             )
                         }
                         composable(ROUTE_ACTIVITY) {
@@ -402,7 +439,18 @@ fun SpendWiseApp(
                                     transferInitialFrom = null
                                     showTransferSheet = true
                                 },
-                                onDeleteTransfer = viewModel::deleteAccountTransfer
+                                onDeleteTransfer = viewModel::deleteAccountTransfer,
+                                onCreateDeposit = {
+                                    editingDeposit = null
+                                    depositInitialAccount = uiState.selectedActivityAccountFilter
+                                    showAddFundsSheet = true
+                                },
+                                onEditDeposit = { deposit ->
+                                    editingDeposit = deposit
+                                    depositInitialAccount = null
+                                    showAddFundsSheet = true
+                                },
+                                onDeleteDeposit = viewModel::deleteAccountDeposit
                             )
                         }
                         composable(ROUTE_PLANS) {
@@ -442,6 +490,11 @@ fun SpendWiseApp(
                                     editingAccount = acct
                                     showAccountDialog = true
                                 },
+                                onAddFundsClick = { acct ->
+                                    editingDeposit = null
+                                    depositInitialAccount = acct?.name
+                                    showAddFundsSheet = true
+                                },
                                 onTransferClick = {
                                     editingTransfer = null
                                     transferInitialFrom = null
@@ -480,6 +533,13 @@ fun SpendWiseApp(
                             )
                         }
                     }
+
+                    GlobalLoadingIndicator(
+                        message = if (uiState.isLoading) "Loading SpendWise..." else uiState.activeRequestMessage,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(start = 16.dp, end = 16.dp, bottom = 84.dp)
+                    )
                 }
             }
         }
@@ -518,6 +578,11 @@ fun SpendWiseApp(
             },
             onDelete = { acct ->
                 viewModel.deleteCustomAccount(acct)
+            },
+            onAddFunds = { acct ->
+                editingDeposit = null
+                depositInitialAccount = acct.name
+                showAddFundsSheet = true
             }
         )
     }
@@ -545,6 +610,34 @@ fun SpendWiseApp(
         },
         onDelete = { transfer ->
             viewModel.deleteAccountTransfer(transfer)
+        }
+    )
+
+    AddFundsSheet(
+        isOpen = showAddFundsSheet,
+        existingDeposit = editingDeposit,
+        initialAccountName = depositInitialAccount,
+        availableAccounts = uiState.accounts,
+        accountSummaries = uiState.summary.accountSummaries,
+        recentSources = uiState.deposits.map { it.source },
+        currencySymbol = uiState.preferences.currencySymbol,
+        onDismiss = {
+            showAddFundsSheet = false
+            editingDeposit = null
+            depositInitialAccount = null
+        },
+        onSave = { existingId, accountName, source, amountCents, timestampMillis, note ->
+            viewModel.saveAccountDeposit(
+                existingId = existingId,
+                accountName = accountName,
+                source = source,
+                amountCents = amountCents,
+                timestampMillis = timestampMillis,
+                note = note
+            )
+        },
+        onDelete = { deposit ->
+            viewModel.deleteAccountDeposit(deposit)
         }
     )
 
@@ -617,6 +710,22 @@ fun SpendWiseApp(
             onSave = { monthly, savings, mode, fixedDaily ->
                 viewModel.updateBudgetSettings(monthly, savings, mode, fixedDaily)
             }
+        )
+    }
+
+    if (showTodaySourceDialog) {
+        TodayBalanceSourceDialog(
+            useAccountsBalance = uiState.preferences.todayUseAccountsBalance,
+            balanceAccountsCount = uiState.summary.balanceTrackedAccountsCount,
+            totalAccountsBalanceCents = uiState.summary.totalAccountsRemainingCents,
+            currencySymbol = uiState.preferences.currencySymbol,
+            onDismiss = { showTodaySourceDialog = false },
+            onSelectSource = viewModel::updateTodayUseAccountsBalance,
+            onManageAccounts = {
+                editingAccount = null
+                showAccountDialog = true
+            },
+            onEditMonthlyBudget = { showMonthlyBudgetDialog = true }
         )
     }
 

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
+import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -39,7 +40,8 @@ fun AccountEditorDialog(
     currencySymbol: String,
     onDismiss: () -> Unit,
     onSave: (existingId: Long?, name: String, initialBalanceCents: Long) -> Unit,
-    onDelete: ((AccountEntity) -> Unit)? = null
+    onDelete: ((AccountEntity) -> Unit)? = null,
+    onAddFunds: ((AccountEntity) -> Unit)? = null
 ) {
     var nameText by remember(existingAccount) {
         mutableStateOf(existingAccount?.name.orEmpty())
@@ -123,6 +125,26 @@ fun AccountEditorDialog(
                         .fillMaxWidth()
                         .testTag("custom_account_balance_input")
                 )
+
+                if (existingAccount != null && onAddFunds != null) {
+                    OutlinedButton(
+                        onClick = {
+                            onDismiss()
+                            onAddFunds(existingAccount)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dialog_add_funds_to_account_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AddCircleOutline,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Add Funds to ${existingAccount.name}")
+                    }
+                }
 
                 if (existingAccount != null && onDelete != null) {
                     if (confirmDelete) {

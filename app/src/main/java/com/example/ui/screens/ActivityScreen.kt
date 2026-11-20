@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Search
@@ -36,9 +37,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.data.AccountDepositEntity
 import com.example.data.AccountTransferEntity
 import com.example.data.ExpenseEntity
 import com.example.model.ExpenseCategory
+import com.example.ui.components.DepositRowCard
 import com.example.ui.components.ExpenseRowCard
 import com.example.ui.components.TransferRowCard
 import com.example.ui.theme.AmountRowStyle
@@ -60,6 +63,9 @@ fun ActivityScreen(
     onCreateTransfer: () -> Unit,
     onEditTransfer: (AccountTransferEntity) -> Unit,
     onDeleteTransfer: (AccountTransferEntity) -> Unit,
+    onCreateDeposit: () -> Unit,
+    onEditDeposit: (AccountDepositEntity) -> Unit,
+    onDeleteDeposit: (AccountDepositEntity) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val semanticColors = LocalSpendWiseColors.current
@@ -278,8 +284,61 @@ fun ActivityScreen(
             }
         }
 
+        // Added Funds section (kept strictly separate from expense totals)
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (uiState.filteredDeposits.isNotEmpty()) {
+                            "Added Funds (${uiState.filteredDeposits.size})"
+                        } else {
+                            "Added Funds"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Text(
+                        text = if (uiState.filteredDeposits.isNotEmpty()) {
+                            "Incoming funds added to accounts • excluded from expense totals"
+                        } else {
+                            "Record money received into an account from any custom source"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(
+                    onClick = onCreateDeposit,
+                    modifier = Modifier.testTag("activity_add_funds_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AddCircleOutline,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Add Funds")
+                }
+            }
+        }
+
+        if (uiState.filteredDeposits.isNotEmpty()) {
+            items(uiState.filteredDeposits, key = { "deposit_${it.id}" }) { deposit ->
+                DepositRowCard(
+                    deposit = deposit,
+                    currencySymbol = currency,
+                    onClick = { onEditDeposit(deposit) },
+                    onDelete = { onDeleteDeposit(deposit) }
+                )
+            }
+        }
+
         if (uiState.filteredExpenses.isEmpty()) {
-            if (uiState.filteredTransfers.isEmpty()) {
+            if (uiState.filteredTransfers.isEmpty() && uiState.filteredDeposits.isEmpty()) {
                 item {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),

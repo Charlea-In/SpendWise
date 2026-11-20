@@ -8,5 +8,6 @@ data class CategoryBudgetEntity(
     @PrimaryKey val category: String,
     val monthlyLimitCents: Long,
     val alert80SentMonth: String = "",
-    val alert100SentMonth: String = ""
+    val alert100SentMonth: String = "",
+    val updatedAtMillis: Long = System.currentTimeMillis()
 )

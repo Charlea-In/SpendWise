@@ -81,7 +81,7 @@ fun GoogleSheetsSyncDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "Paste your deployed Google Apps Script Web App URL to sync daily expenses and category budgets directly with your own Google Sheet.",
+                    text = "Paste your deployed Google Apps Script Web App URL to sync all your data across devices: expenses, accounts, added funds, transfers, plans, points, category limits, and budget settings.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -119,7 +119,7 @@ fun GoogleSheetsSyncDialog(
                             style = MaterialTheme.typography.labelLarge
                         )
                         Text(
-                            text = "Push expenses & limits automatically",
+                            text = "Sync expenses, funds, accounts, plans & limits",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -216,15 +216,15 @@ fun GoogleSheetsSyncDialog(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 Text(
-                                    text = "2. Paste docs/Code.gs from the GitHub repo and save.",
+                                    text = "2. Paste docs/Code.gs into Code.gs and save.",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 Text(
-                                    text = "3. Click Deploy → New deployment → Web app (Execute as: Me, Who has access: Anyone).",
+                                    text = "3. Deploy → New deployment → Web app (Execute as: Me, Access: Anyone). If upgrading Code.gs, use Manage deployments → Edit → New version → Deploy.",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 Text(
-                                    text = "4. Copy the /exec Web App URL above and tap Save & Sync.",
+                                    text = "4. Paste the /exec URL on every device and tap Save & Sync.",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }

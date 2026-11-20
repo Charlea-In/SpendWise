@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiExpenseParser
 import com.example.ai.ParsedNaturalExpense
 import com.example.audio.VoiceExpenseRecorder
+import com.example.data.AccountDepositEntity
 import com.example.data.AccountEntity
 import com.example.data.AccountTransferEntity
 import com.example.data.BankMessageProcessOutcome
@@ -104,6 +105,9 @@ data class SpendWiseUiState(
     val transfers: List<AccountTransferEntity> = emptyList(),
     val todayTransfers: List<AccountTransferEntity> = emptyList(),
     val filteredTransfers: List<AccountTransferEntity> = emptyList(),
+    val deposits: List<AccountDepositEntity> = emptyList(),
+    val todayDeposits: List<AccountDepositEntity> = emptyList(),
+    val filteredDeposits: List<AccountDepositEntity> = emptyList(),
     val accounts: List<AccountEntity> = emptyList(),
     val pointsAccounts: List<PointsAccountEntity> = emptyList(),
     val selectedTodayAccount: String? = null,
@@ -128,13 +132,15 @@ data class SpendWiseUiState(
     val latestAlertBanner: BudgetAlertEvent? = null,
     val hasNotificationPermission: Boolean = true,
     val syncState: SyncUiState = SyncUiState(),
-    val geminiState: GeminiQuickLogState = GeminiQuickLogState()
+    val geminiState: GeminiQuickLogState = GeminiQuickLogState(),
+    val activeRequestMessage: String? = null
 )
 
 enum class UndoActionType {
     NONE,
     EXPENSE,
     TRANSFER,
+    DEPOSIT,
     POINTS
 }
 
@@ -161,7 +167,8 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         commitmentDao = database.commitmentDao(),
         detectedTransactionDao = database.detectedTransactionDao(),
         preferencesRepository = preferencesRepository,
-        notificationHelper = notificationHelper
+        notificationHelper = notificationHelper,
+        accountDepositDao = database.accountDepositDao()
     )
 
     private val searchQuery = MutableStateFlow("")
@@ -188,6 +195,7 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var lastDeletedExpense: ExpenseEntity? = null
     private var lastDeletedTransfer: AccountTransferEntity? = null
+    private var lastDeletedDeposit: AccountDepositEntity? = null
     private var lastDeletedPointsAccount: PointsAccountEntity? = null
     private var categorizeJob: Job? = null
     private var recordingTickerJob: Job? = null
@@ -212,21 +220,27 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             FilterTuple(q, cat, tf, actAcct, todayAcct)
         },
         combine(
-            alertBanner,
-            permissionGrantedState,
-            syncUiState,
-            geminiUiState,
-            commitmentTypeFilter
-        ) { banner, perm, sync, gemini, commitFilter ->
-            StatusTuple(banner, perm, sync, gemini, commitFilter)
+            combine(
+                alertBanner,
+                permissionGrantedState,
+                syncUiState
+            ) { banner, perm, sync -> Triple(banner, perm, sync) },
+            combine(
+                geminiUiState,
+                commitmentTypeFilter,
+                repository.activeRequestMessage
+            ) { gemini, commitFilter, activeReq -> Triple(gemini, commitFilter, activeReq) }
+        ) { (banner, perm, sync), (gemini, commitFilter, activeReq) ->
+            StatusTuple(banner, perm, sync, gemini, commitFilter, activeReq)
         },
         combine(
             repository.pendingDetectedTransactions,
             listenerAccessState,
             repository.allTransfers,
-            repository.allPointsAccounts
-        ) { pendingDetected, listenerAccess, transfers, pointsAccounts ->
-            BankDetectionTuple(pendingDetected, listenerAccess, transfers, pointsAccounts)
+            repository.allPointsAccounts,
+            repository.allDeposits
+        ) { pendingDetected, listenerAccess, transfers, pointsAccounts, deposits ->
+            BankDetectionTuple(pendingDetected, listenerAccess, transfers, pointsAccounts, deposits)
         }
     ) { data, filters, status, bankDetection ->
         val now = System.currentTimeMillis()
@@ -250,6 +264,11 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
                     transfer.fromAccountName.equals(validTodayAccount, ignoreCase = true) ||
                     transfer.toAccountName.equals(validTodayAccount, ignoreCase = true))
         }
+        val todayDeposits = bankDetection.deposits.filter { deposit ->
+            deposit.timestampMillis in todayStart..todayEnd &&
+                (validTodayAccount == null ||
+                    deposit.accountName.equals(validTodayAccount, ignoreCase = true))
+        }
 
         val summary = FinancialInsightsEngine.compute(
             expenses = data.expenses,
@@ -257,7 +276,8 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             prefs = data.prefs,
             nowMillis = now,
             accounts = data.accounts,
-            transfers = bankDetection.transfers
+            transfers = bankDetection.transfers,
+            deposits = bankDetection.deposits
         )
 
         val filtered = filterExpenses(
@@ -270,6 +290,14 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         )
         val filteredTransfers = filterTransfers(
             transfers = bankDetection.transfers,
+            query = filters.query,
+            category = filters.category,
+            accountName = validActivityAccount,
+            timeframe = filters.timeframe,
+            nowMillis = now
+        )
+        val filteredDeposits = filterDeposits(
+            deposits = bankDetection.deposits,
             query = filters.query,
             category = filters.category,
             accountName = validActivityAccount,
@@ -301,6 +329,14 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         }
         val commitmentsSummary = CommitmentScheduleHelper.summarize(evaluatedCommitments)
 
+        val resolvedActiveRequest = when {
+            status.gemini.isParsing -> status.gemini.parsingStatusText.ifBlank { "Processing with Gemini..." }
+            status.sync.isTestingConnection -> "Testing Google Sheet connection..."
+            status.sync.isSyncing -> "Syncing with Google Sheet..."
+            !status.activeRepoRequest.isNullOrBlank() -> status.activeRepoRequest
+            else -> null
+        }
+
         SpendWiseUiState(
             isLoading = false,
             expenses = data.expenses,
@@ -309,6 +345,9 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             transfers = bankDetection.transfers,
             todayTransfers = todayTransfers,
             filteredTransfers = filteredTransfers,
+            deposits = bankDetection.deposits,
+            todayDeposits = todayDeposits,
+            filteredDeposits = filteredDeposits,
             accounts = data.accounts,
             pointsAccounts = bankDetection.pointsAccounts,
             selectedTodayAccount = validTodayAccount,
@@ -329,7 +368,8 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             latestAlertBanner = status.banner,
             hasNotificationPermission = status.hasPermission,
             syncState = status.sync,
-            geminiState = status.gemini
+            geminiState = status.gemini,
+            activeRequestMessage = resolvedActiveRequest
         )
     }.stateIn(
         scope = viewModelScope,
@@ -340,11 +380,18 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
     init {
         viewModelScope.launch {
             combine(
-                repository.allExpenses,
-                repository.categoryBudgets,
-                repository.preferences,
-                repository.allPointsAccounts
-            ) { _, _, _, _ -> Unit }
+                combine(
+                    repository.allExpenses,
+                    repository.categoryBudgets,
+                    repository.preferences
+                ) { _, _, _ -> Unit },
+                combine(
+                    repository.allAccounts,
+                    repository.allTransfers,
+                    repository.allDeposits,
+                    repository.allPointsAccounts
+                ) { _, _, _, _ -> Unit }
+            ) { _, _ -> Unit }
                 .drop(1)
                 .collect {
                     SpendWiseBalanceWidgetProvider.refreshAll(getApplication())
@@ -436,6 +483,10 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         viewModelScope.launch {
+            val hasAccess = BankNotificationAccessHelper.isNotificationAccessEnabled(getApplication())
+            listenerAccessState.value = hasAccess
+            val prefs = uiState.value.preferences
+
             val outcome = repository.processIncomingBankMessage(
                 sourcePackage = "manual_paste",
                 sourceAppLabel = rawTitle.trim().ifBlank { "Bank Message" },
@@ -443,25 +494,35 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
                 rawBody = trimmedBody,
                 respectToggle = false
             )
-            val symbol = uiState.value.preferences.currencySymbol
+
+            val configWarning = buildString {
+                if (!hasAccess) {
+                    append(" Warning: Android Notification Access is OFF for SpendWise, so automatic background alerts will not arrive until granted.")
+                }
+                if (!prefs.bankDetectionEnabled) {
+                    append(" Warning: \"Listen for Bank Charge Alerts\" is currently OFF in Budget settings.")
+                }
+            }
+
+            val symbol = prefs.currencySymbol
             when (outcome) {
                 is BankMessageProcessOutcome.AutoLogged -> {
                     if (outcome.alerts.isNotEmpty()) {
                         alertBanner.value = outcome.alerts.first()
                     }
                     val amt = MoneyFormatter.format(outcome.entity.amountCents, symbol)
-                    onOutcomeMessage("Auto-logged $amt at ${outcome.entity.merchant}", true)
+                    onOutcomeMessage("Auto-logged $amt at ${outcome.entity.merchant}.$configWarning", true)
                 }
                 is BankMessageProcessOutcome.QueuedForReview -> {
                     val amt = MoneyFormatter.format(outcome.entity.amountCents, symbol)
-                    onOutcomeMessage("Detected $amt at ${outcome.entity.merchant} — added to Today's review queue", true)
+                    onOutcomeMessage("Detected $amt at ${outcome.entity.merchant} — added to Today's review queue.$configWarning", true)
                 }
                 BankMessageProcessOutcome.Duplicate -> {
-                    onOutcomeMessage("This exact charge was already detected in the last few minutes.", false)
+                    onOutcomeMessage("This exact charge was already detected in the last few minutes.$configWarning", false)
                 }
                 BankMessageProcessOutcome.Ignored -> {
                     onOutcomeMessage(
-                        "No card or bank charge was recognized (OTPs, verification codes, declines & promos are filtered out).",
+                        "No card or bank charge was recognized (OTPs, verification codes, declines & promos are filtered out).$configWarning",
                         false
                     )
                 }
@@ -592,8 +653,65 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         when (undoType) {
             UndoActionType.EXPENSE -> undoDeleteExpense()
             UndoActionType.TRANSFER -> undoDeleteTransfer()
+            UndoActionType.DEPOSIT -> undoDeleteDeposit()
             UndoActionType.POINTS -> undoDeletePointsAccount()
             UndoActionType.NONE -> Unit
+        }
+    }
+
+    fun saveAccountDeposit(
+        existingId: Long? = null,
+        accountName: String,
+        source: String,
+        amountCents: Long,
+        timestampMillis: Long,
+        note: String
+    ) {
+        viewModelScope.launch {
+            val result = repository.saveAccountDeposit(
+                existingId = existingId,
+                accountName = accountName,
+                source = source,
+                amountCents = amountCents,
+                timestampMillis = timestampMillis,
+                note = note
+            )
+            result.fold(
+                onSuccess = { saved ->
+                    val symbol = uiState.value.preferences.currencySymbol
+                    val amt = MoneyFormatter.format(saved.amountCents, symbol)
+                    val verb = if (existingId != null && existingId > 0L) "Updated funds:" else "Added"
+                    _effects.emit(
+                        UiEffect.ShowSnackbar(
+                            "$verb $amt to ${saved.accountName} (${saved.source})"
+                        )
+                    )
+                },
+                onFailure = { err ->
+                    _effects.emit(UiEffect.ShowSnackbar(err.localizedMessage ?: "Couldn't add funds"))
+                }
+            )
+        }
+    }
+
+    fun deleteAccountDeposit(deposit: AccountDepositEntity) {
+        viewModelScope.launch {
+            lastDeletedDeposit = deposit
+            repository.deleteAccountDeposit(deposit)
+            _effects.emit(
+                UiEffect.ShowSnackbar(
+                    message = "Removed ${deposit.source} from ${deposit.accountName}",
+                    undoType = UndoActionType.DEPOSIT
+                )
+            )
+        }
+    }
+
+    private fun undoDeleteDeposit() {
+        val toRestore = lastDeletedDeposit ?: return
+        lastDeletedDeposit = null
+        viewModelScope.launch {
+            repository.restoreAccountDeposit(toRestore)
         }
     }
 
@@ -869,6 +987,8 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         val wasAuto = !state.isCategoryManuallyChosen &&
             state.categorizationResult?.suggestedCategory == category
 
+        _editorState.update { it.copy(isOpen = false, editingDetectedId = null, validationError = null) }
+
         viewModelScope.launch {
             val alerts = repository.saveExpense(
                 existingId = state.editingId,
@@ -885,7 +1005,6 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             state.editingDetectedId?.let { detectedId ->
                 repository.markDetectedTransactionApproved(detectedId)
             }
-            _editorState.update { it.copy(isOpen = false, editingDetectedId = null, validationError = null) }
             if (alerts.isNotEmpty()) {
                 alertBanner.value = alerts.first()
             }
@@ -900,12 +1019,14 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun logQuickPreset(preset: QuickPreset) {
+        val activeAccount = selectedTodayAccount.value.orEmpty()
         viewModelScope.launch {
             val alerts = repository.saveExpense(
                 description = preset.description,
                 amountCents = preset.amountCents,
                 category = preset.category,
                 paymentMethod = PaymentMethod.CARD,
+                accountName = activeAccount,
                 timestampMillis = System.currentTimeMillis(),
                 note = "",
                 wasAutoCategorized = true
@@ -914,9 +1035,10 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
                 alertBanner.value = alerts.first()
             }
             val symbol = uiState.value.preferences.currencySymbol
+            val acctSuffix = if (activeAccount.isNotBlank()) " on $activeAccount" else ""
             _effects.emit(
                 UiEffect.ShowSnackbar(
-                    "Logged ${preset.label} (${MoneyFormatter.format(preset.amountCents, symbol)})"
+                    "Logged ${preset.label} (${MoneyFormatter.format(preset.amountCents, symbol)})$acctSuffix"
                 )
             )
         }
@@ -1046,6 +1168,18 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
                 fixedDailyLimitCents = fixedDailyLimitCents
             )
             _effects.emit(UiEffect.ShowSnackbar("Updated monthly budget plan"))
+        }
+    }
+
+    fun updateTodayUseAccountsBalance(useAccounts: Boolean) {
+        viewModelScope.launch {
+            repository.updateTodayUseAccountsBalance(useAccounts)
+            val msg = if (useAccounts) {
+                "Today screen now uses money in your accounts"
+            } else {
+                "Today screen switched to monthly budget plan"
+            }
+            _effects.emit(UiEffect.ShowSnackbar(msg))
         }
     }
 
@@ -1186,7 +1320,10 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
                     val result = geminiParser.parseAudioExpense(
                         audioBytes = recorded.bytes,
                         mimeType = recorded.mimeType,
-                        existingAccounts = existingAccountNames
+                        existingAccounts = existingAccountNames,
+                        onStatusUpdate = { status ->
+                            geminiUiState.update { it.copy(parsingStatusText = status) }
+                        }
                     )
                     handleParsedGeminiResult(result, fromVoice = true)
                 }
@@ -1224,7 +1361,13 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             val existingAccountNames = uiState.value.accounts.map { it.name }
-            val result = geminiParser.parseNaturalLanguageExpense(rawPrompt, existingAccountNames)
+            val result = geminiParser.parseNaturalLanguageExpense(
+                userPrompt = rawPrompt,
+                existingAccounts = existingAccountNames,
+                onStatusUpdate = { status ->
+                    geminiUiState.update { it.copy(parsingStatusText = status) }
+                }
+            )
             handleParsedGeminiResult(result, fromVoice = false)
         }
     }
@@ -1395,6 +1538,41 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun filterDeposits(
+        deposits: List<AccountDepositEntity>,
+        query: String,
+        category: ExpenseCategory?,
+        accountName: String?,
+        timeframe: ActivityTimeframe,
+        nowMillis: Long
+    ): List<AccountDepositEntity> {
+        if (category != null) return emptyList()
+        val todayStart = DateUtils.startOfDayMillis(nowMillis)
+        val weekStart = DateUtils.lastNDaysStarts(7, nowMillis).first()
+        val monthStart = DateUtils.startOfMonthMillis(nowMillis)
+        val todayEnd = DateUtils.endOfDayMillis(nowMillis)
+        val cleanQuery = query.trim().lowercase()
+
+        return deposits.filter { item ->
+            val matchesTime = when (timeframe) {
+                ActivityTimeframe.TODAY -> item.timestampMillis in todayStart..todayEnd
+                ActivityTimeframe.WEEK -> item.timestampMillis in weekStart..todayEnd
+                ActivityTimeframe.MONTH -> item.timestampMillis in monthStart..todayEnd
+                ActivityTimeframe.ALL -> true
+            }
+            val matchesAccount = accountName == null ||
+                item.accountName.equals(accountName, ignoreCase = true)
+            val matchesQuery = cleanQuery.isBlank() ||
+                item.accountName.lowercase().contains(cleanQuery) ||
+                item.source.lowercase().contains(cleanQuery) ||
+                item.note.lowercase().contains(cleanQuery) ||
+                "funds".contains(cleanQuery) ||
+                "deposit".contains(cleanQuery)
+
+            matchesTime && matchesAccount && matchesQuery
+        }
+    }
+
     private data class DataSourcesTuple(
         val expenses: List<ExpenseEntity>,
         val budgets: List<CategoryBudgetEntity>,
@@ -1416,13 +1594,15 @@ class SpendWiseViewModel(application: Application) : AndroidViewModel(applicatio
         val hasPermission: Boolean,
         val sync: SyncUiState,
         val gemini: GeminiQuickLogState,
-        val commitmentFilter: CommitmentType?
+        val commitmentFilter: CommitmentType?,
+        val activeRepoRequest: String?
     )
 
     private data class BankDetectionTuple(
         val pendingDetected: List<DetectedTransactionEntity>,
         val hasListenerAccess: Boolean,
         val transfers: List<AccountTransferEntity>,
-        val pointsAccounts: List<PointsAccountEntity>
+        val pointsAccounts: List<PointsAccountEntity>,
+        val deposits: List<AccountDepositEntity>
     )
 }

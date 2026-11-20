@@ -16,5 +16,6 @@ data class ExpenseEntity(
     val timestampMillis: Long = System.currentTimeMillis(),
     val note: String = "",
     val wasAutoCategorized: Boolean = false,
-    val isDemo: Boolean = false
+    val isDemo: Boolean = false,
+    val updatedAtMillis: Long = System.currentTimeMillis()
 )

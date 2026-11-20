@@ -69,8 +69,9 @@ object BankMessageParser {
     )
 
     private val lastFourRegexes = listOf(
-        Regex("""(?:\*{2,}|x{2,}|•{2,})\s*([0-9]{4})\b""", RegexOption.IGNORE_CASE),
-        Regex("""(?:ending(?:\s+in)?|terminaci[oó]n(?:\s+en)?|final(?:es)?|tarjeta|card|acct|cuenta)\s*(?:#|no\.?|num\.?)?\s*[:\-]?\s*\*{0,4}([0-9]{4})\b""", RegexOption.IGNORE_CASE)
+        Regex("""(?:\*{2,}|x{2,}|•{2,})\s*([0-9]{4})(?![0-9\-:])\b""", RegexOption.IGNORE_CASE),
+        Regex("""(?:ending(?:\s+in)?|terminaci[oó]n(?:\s+en)?|final(?:es)?|tarjeta|card|acct|cuenta)\s*(?:#|no\.?|num\.?)?\s*[:\-]?\s*\*{0,4}([0-9]{4})(?![0-9\-:])\b""", RegexOption.IGNORE_CASE),
+        Regex("""(?:cuenta|tarjeta|card|acct)\s+(?:[A-Za-z0-9._-]{2,20}\s+)\*{0,4}([0-9]{4})(?![0-9\-:])\b""", RegexOption.IGNORE_CASE)
     )
 
     private val merchantPatterns = listOf(
@@ -111,7 +112,7 @@ object BankMessageParser {
 
         // Skip obvious pure OTP digit patterns like "is 482910" without charge keywords
         val hasChargeSignal = chargeActionKeywords.any { lower.contains(it) }
-        val hasCurrencySymbol = Regex("""[\$€£¥₹₱₩]|(?:USD|MXN|EUR|GBP|CAD)\b""", RegexOption.IGNORE_CASE)
+        val hasCurrencySymbol = Regex("""[\$€£¥₹₱₩]|(?:USD|MXN|EUR|GBP|CAD)(?=\b|\s|[0-9])""", RegexOption.IGNORE_CASE)
             .containsMatchIn(combined)
 
         // Balance-only alerts (e.g., "Your balance is $1,240.00") without any charge keyword

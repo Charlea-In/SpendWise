@@ -33,7 +33,9 @@ data class BudgetPreferences(
     val geminiAssistEnabled: Boolean = true,
     val bankDetectionEnabled: Boolean = true,
     val bankAutoLogEnabled: Boolean = false,
-    val bankDefaultAccountName: String = ""
+    val bankDefaultAccountName: String = "",
+    val todayUseAccountsBalance: Boolean = true,
+    val settingsUpdatedAtMillis: Long = 0L
 ) {
     val isSheetConnected: Boolean
         get() = appsScriptUrl.isNotBlank()
@@ -60,6 +62,8 @@ class BudgetPreferencesRepository(private val context: Context) {
         val BANK_DETECTION_ENABLED = booleanPreferencesKey("bank_detection_enabled")
         val BANK_AUTO_LOG_ENABLED = booleanPreferencesKey("bank_auto_log_enabled")
         val BANK_DEFAULT_ACCOUNT = stringPreferencesKey("bank_default_account")
+        val TODAY_USE_ACCOUNTS_BALANCE = booleanPreferencesKey("today_use_accounts_balance")
+        val SETTINGS_UPDATED_AT_MILLIS = longPreferencesKey("settings_updated_at_millis")
     }
 
     val preferencesFlow: Flow<BudgetPreferences> = context.spendWiseDataStore.data.map { prefs ->
@@ -81,7 +85,9 @@ class BudgetPreferencesRepository(private val context: Context) {
             geminiAssistEnabled = prefs[Keys.GEMINI_ASSIST_ENABLED] ?: true,
             bankDetectionEnabled = prefs[Keys.BANK_DETECTION_ENABLED] ?: true,
             bankAutoLogEnabled = prefs[Keys.BANK_AUTO_LOG_ENABLED] ?: false,
-            bankDefaultAccountName = prefs[Keys.BANK_DEFAULT_ACCOUNT] ?: ""
+            bankDefaultAccountName = prefs[Keys.BANK_DEFAULT_ACCOUNT] ?: "",
+            todayUseAccountsBalance = prefs[Keys.TODAY_USE_ACCOUNTS_BALANCE] ?: true,
+            settingsUpdatedAtMillis = prefs[Keys.SETTINGS_UPDATED_AT_MILLIS] ?: 0L
         )
     }
 
@@ -100,12 +106,14 @@ class BudgetPreferencesRepository(private val context: Context) {
             prefs[Keys.FIXED_DAILY_LIMIT_CENTS] = fixedDailyLimitCents.coerceAtLeast(0L)
             prefs[Keys.OVERALL_ALERT_80_MONTH] = ""
             prefs[Keys.OVERALL_ALERT_100_MONTH] = ""
+            prefs[Keys.SETTINGS_UPDATED_AT_MILLIS] = System.currentTimeMillis()
         }
     }
 
     suspend fun updateCurrencySymbol(symbol: String) {
         context.spendWiseDataStore.edit { prefs ->
             prefs[Keys.CURRENCY_SYMBOL] = symbol
+            prefs[Keys.SETTINGS_UPDATED_AT_MILLIS] = System.currentTimeMillis()
         }
     }
 
@@ -165,6 +173,35 @@ class BudgetPreferencesRepository(private val context: Context) {
             prefs[Keys.BANK_DETECTION_ENABLED] = detectionEnabled
             prefs[Keys.BANK_AUTO_LOG_ENABLED] = autoLogEnabled
             prefs[Keys.BANK_DEFAULT_ACCOUNT] = defaultAccountName.trim()
+        }
+    }
+
+    suspend fun updateTodayUseAccountsBalance(useAccounts: Boolean) {
+        context.spendWiseDataStore.edit { prefs ->
+            prefs[Keys.TODAY_USE_ACCOUNTS_BALANCE] = useAccounts
+            prefs[Keys.SETTINGS_UPDATED_AT_MILLIS] = System.currentTimeMillis()
+        }
+    }
+
+    suspend fun applyRemoteSettings(
+        monthlyBudgetCents: Long,
+        monthlySavingsGoalCents: Long,
+        dailyMode: DailyBudgetMode,
+        fixedDailyLimitCents: Long,
+        currencySymbol: String,
+        todayUseAccountsBalance: Boolean,
+        updatedAtMillis: Long
+    ) {
+        context.spendWiseDataStore.edit { prefs ->
+            prefs[Keys.MONTHLY_BUDGET_CENTS] = monthlyBudgetCents.coerceAtLeast(0L)
+            prefs[Keys.MONTHLY_SAVINGS_GOAL_CENTS] = monthlySavingsGoalCents.coerceAtLeast(0L)
+            prefs[Keys.DAILY_MODE] = dailyMode.name
+            prefs[Keys.FIXED_DAILY_LIMIT_CENTS] = fixedDailyLimitCents.coerceAtLeast(0L)
+            if (currencySymbol.isNotBlank()) {
+                prefs[Keys.CURRENCY_SYMBOL] = currencySymbol
+            }
+            prefs[Keys.TODAY_USE_ACCOUNTS_BALANCE] = todayUseAccountsBalance
+            prefs[Keys.SETTINGS_UPDATED_AT_MILLIS] = updatedAtMillis
         }
     }
 }

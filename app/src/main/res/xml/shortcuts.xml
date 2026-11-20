@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="voice_log_expense"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher_round"
+        android:shortcutShortLabel="@string/shortcut_voice_log_short"
+        android:shortcutLongLabel="@string/shortcut_voice_log_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.aistudio.spendwise.kxmrpq"
+            android:targetClass="com.example.MainActivity"
+            android:data="spendwise://voice" />
+        <capability-binding android:key="actions.intent.OPEN_APP_FEATURE">
+            <parameter-binding
+                android:key="feature"
+                android:value="voice expense" />
+        </capability-binding>
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="quick_log_expense"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher_round"
+        android:shortcutShortLabel="@string/shortcut_quick_log_short"
+        android:shortcutLongLabel="@string/shortcut_quick_log_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.aistudio.spendwise.kxmrpq"
+            android:targetClass="com.example.MainActivity"
+            android:data="spendwise://log" />
+    </shortcut>
+
+    <capability android:name="actions.intent.OPEN_APP_FEATURE">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.aistudio.spendwise.kxmrpq"
+            android:targetClass="com.example.MainActivity">
+            <parameter
+                android:name="feature"
+                android:key="feature" />
+        </intent>
+    </capability>
+</shortcuts>

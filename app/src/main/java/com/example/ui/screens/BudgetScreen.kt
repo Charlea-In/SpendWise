@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.CloudDone
@@ -47,6 +48,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -54,6 +56,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,6 +100,7 @@ fun BudgetScreen(
     onApplySuggestedBudgets: () -> Unit,
     onCreateAccount: () -> Unit,
     onEditAccount: (AccountEntity) -> Unit,
+    onAddFundsClick: (AccountEntity?) -> Unit,
     onTransferClick: () -> Unit,
     onCreatePointsAccount: () -> Unit,
     onEditPointsAccount: (PointsAccountEntity) -> Unit,
@@ -306,6 +310,21 @@ fun BudgetScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedButton(
+                            onClick = { onAddFundsClick(null) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("budget_add_funds_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AddCircleOutline,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Add Funds", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        OutlinedButton(
                             onClick = onTransferClick,
                             modifier = Modifier
                                 .weight(1f)
@@ -317,8 +336,8 @@ fun BudgetScreen(
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Transfer")
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Transfer", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         FilledTonalButton(
                             onClick = onCreateAccount,
@@ -332,14 +351,14 @@ fun BudgetScreen(
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("New Account")
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("New", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
 
                     if (summary.accountSummaries.isEmpty()) {
                         Text(
-                            text = "No custom accounts yet. Tap New Account or Transfer to set up your separate accounts.",
+                            text = "No custom accounts yet. Tap New, Add Funds, or Transfer to set up your separate accounts.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -368,6 +387,9 @@ fun BudgetScreen(
                                         if (item.hasStartingBalance) {
                                             add("Start ${MoneyFormatter.format(item.account.initialBalanceCents, currency)}")
                                         }
+                                        if (item.addedFundsCents > 0L) {
+                                            add("Funds +${MoneyFormatter.format(item.addedFundsCents, currency)}")
+                                        }
                                         if (item.transferredInCents > 0L) {
                                             add("In +${MoneyFormatter.format(item.transferredInCents, currency)}")
                                         }
@@ -385,7 +407,7 @@ fun BudgetScreen(
                                 }
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
                                     if (item.hasBalanceOrTransferActivity) {
                                         val isNeg = item.remainingBalanceCents < 0L
@@ -397,6 +419,19 @@ fun BudgetScreen(
                                             },
                                             style = AmountRowStyle,
                                             color = if (isNeg) semanticColors.danger else semanticColors.positive
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onAddFundsClick(item.account) },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("budget_add_funds_account_${item.account.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.AddCircleOutline,
+                                            contentDescription = "Add funds to ${item.account.name}",
+                                            tint = semanticColors.positive,
+                                            modifier = Modifier.size(18.dp)
                                         )
                                     }
                                     Icon(
@@ -663,7 +698,7 @@ fun BudgetScreen(
                                 text = if (prefs.isSheetConnected) {
                                     prefs.lastSyncMessage.ifBlank { prefs.appsScriptUrl }
                                 } else {
-                                    "Add your Apps Script Web App URL to back up & sync with Google Sheets"
+                                    "Add your Apps Script Web App URL to sync all data across devices via Google Sheets"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -83,9 +83,19 @@ class SpendWiseBalanceWidgetProvider : AppWidgetProvider() {
 
             val expenses = db.expenseDao().observeAllExpenses().first()
             val budgets = db.categoryBudgetDao().observeAllCategoryBudgets().first()
+            val accounts = db.accountDao().observeAllAccounts().first()
+            val transfers = db.accountTransferDao().observeAllTransfers().first()
+            val deposits = db.accountDepositDao().observeAllDeposits().first()
             val pointsAccounts = db.pointsAccountDao().getAllPointsAccountsOnce()
             val prefs = prefsRepo.getCurrentPreferences()
-            val summary = FinancialInsightsEngine.compute(expenses, budgets, prefs)
+            val summary = FinancialInsightsEngine.compute(
+                expenses = expenses,
+                categoryBudgets = budgets,
+                prefs = prefs,
+                accounts = accounts,
+                transfers = transfers,
+                deposits = deposits
+            )
             val currency = prefs.currencySymbol
 
             val views = RemoteViews(context.packageName, R.layout.widget_balance)
@@ -99,49 +109,95 @@ class SpendWiseBalanceWidgetProvider : AppWidgetProvider() {
                 }
             )
 
-            // Daily balance
-            val dailyOver = summary.todayRemainingCents < 0L
-            views.setTextViewText(
-                R.id.widget_daily_label,
-                if (dailyOver) "DAILY OVER" else "DAILY BALANCE"
-            )
-            views.setTextViewText(
-                R.id.widget_daily_amount,
-                MoneyFormatter.format(abs(summary.todayRemainingCents), currency)
-            )
-            views.setTextColor(
-                R.id.widget_daily_amount,
-                ContextCompat.getColor(
-                    context,
-                    if (dailyOver) R.color.widget_danger else R.color.widget_accent
-                )
-            )
-            views.setTextViewText(
-                R.id.widget_daily_sub,
-                "Spent ${MoneyFormatter.format(summary.todaySpentCents, currency, compactWhole = true)} / ${MoneyFormatter.format(summary.dailyAllowanceCents, currency, compactWhole = true)}"
-            )
+            val useAccountsWidget = prefs.todayUseAccountsBalance && summary.balanceTrackedAccountsCount > 0
 
-            // Weekly balance (7-day window)
-            val weeklyOver = summary.weeklyRemainingCents < 0L
-            views.setTextViewText(
-                R.id.widget_weekly_label,
-                if (weeklyOver) "WEEKLY OVER" else "WEEKLY BALANCE"
-            )
-            views.setTextViewText(
-                R.id.widget_weekly_amount,
-                MoneyFormatter.format(abs(summary.weeklyRemainingCents), currency)
-            )
-            views.setTextColor(
-                R.id.widget_weekly_amount,
-                ContextCompat.getColor(
-                    context,
-                    if (weeklyOver) R.color.widget_danger else R.color.widget_accent
+            if (useAccountsWidget) {
+                val overdrawn = summary.totalAccountsRemainingCents < 0L
+                views.setTextViewText(
+                    R.id.widget_daily_label,
+                    if (overdrawn) "ACCOUNTS OVER" else "ACCOUNTS BAL"
                 )
-            )
-            views.setTextViewText(
-                R.id.widget_weekly_sub,
-                "7d ${MoneyFormatter.format(summary.weekSpentCents, currency, compactWhole = true)} / ${MoneyFormatter.format(summary.weeklyAllowanceCents, currency, compactWhole = true)}"
-            )
+                views.setTextViewText(
+                    R.id.widget_daily_amount,
+                    MoneyFormatter.format(abs(summary.totalAccountsRemainingCents), currency)
+                )
+                views.setTextColor(
+                    R.id.widget_daily_amount,
+                    ContextCompat.getColor(
+                        context,
+                        if (overdrawn) R.color.widget_danger else R.color.widget_accent
+                    )
+                )
+                views.setTextViewText(
+                    R.id.widget_daily_sub,
+                    "${summary.balanceTrackedAccountsCount} acct • Today ${MoneyFormatter.format(summary.todaySpentCents, currency, compactWhole = true)}"
+                )
+
+                val paceOver = summary.accountTodayRemainingCents < 0L
+                views.setTextViewText(
+                    R.id.widget_weekly_label,
+                    if (paceOver) "PACE OVER" else "SAFE TODAY"
+                )
+                views.setTextViewText(
+                    R.id.widget_weekly_amount,
+                    MoneyFormatter.format(abs(summary.accountTodayRemainingCents), currency)
+                )
+                views.setTextColor(
+                    R.id.widget_weekly_amount,
+                    ContextCompat.getColor(
+                        context,
+                        if (paceOver) R.color.widget_danger else R.color.widget_accent
+                    )
+                )
+                views.setTextViewText(
+                    R.id.widget_weekly_sub,
+                    "Pace ${MoneyFormatter.format(summary.accountDailyAllowanceCents, currency, compactWhole = true)}/d • ${summary.daysRemainingInMonth}d"
+                )
+            } else {
+                // Daily balance
+                val dailyOver = summary.todayRemainingCents < 0L
+                views.setTextViewText(
+                    R.id.widget_daily_label,
+                    if (dailyOver) "DAILY OVER" else "DAILY BALANCE"
+                )
+                views.setTextViewText(
+                    R.id.widget_daily_amount,
+                    MoneyFormatter.format(abs(summary.todayRemainingCents), currency)
+                )
+                views.setTextColor(
+                    R.id.widget_daily_amount,
+                    ContextCompat.getColor(
+                        context,
+                        if (dailyOver) R.color.widget_danger else R.color.widget_accent
+                    )
+                )
+                views.setTextViewText(
+                    R.id.widget_daily_sub,
+                    "Spent ${MoneyFormatter.format(summary.todaySpentCents, currency, compactWhole = true)} / ${MoneyFormatter.format(summary.dailyAllowanceCents, currency, compactWhole = true)}"
+                )
+
+                // Weekly balance (7-day window)
+                val weeklyOver = summary.weeklyRemainingCents < 0L
+                views.setTextViewText(
+                    R.id.widget_weekly_label,
+                    if (weeklyOver) "WEEKLY OVER" else "WEEKLY BALANCE"
+                )
+                views.setTextViewText(
+                    R.id.widget_weekly_amount,
+                    MoneyFormatter.format(abs(summary.weeklyRemainingCents), currency)
+                )
+                views.setTextColor(
+                    R.id.widget_weekly_amount,
+                    ContextCompat.getColor(
+                        context,
+                        if (weeklyOver) R.color.widget_danger else R.color.widget_accent
+                    )
+                )
+                views.setTextViewText(
+                    R.id.widget_weekly_sub,
+                    "7d ${MoneyFormatter.format(summary.weekSpentCents, currency, compactWhole = true)} / ${MoneyFormatter.format(summary.weeklyAllowanceCents, currency, compactWhole = true)}"
+                )
+            }
 
             // Points quick-view summary (does not affect balances)
             if (pointsAccounts.isEmpty()) {

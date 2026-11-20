@@ -1,5 +1,6 @@
 package com.example.util
 
+import com.example.data.AccountDepositEntity
 import com.example.data.AccountEntity
 import com.example.data.AccountTransferEntity
 import com.example.data.BudgetPreferences
@@ -8,6 +9,7 @@ import com.example.data.ExpenseEntity
 import com.example.model.DailyBudgetMode
 import com.example.model.ExpenseCategory
 import java.util.Calendar
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 enum class BudgetStatusLevel {
@@ -45,16 +47,46 @@ data class AccountSummaryItem(
     val monthSpentCents: Long,
     val transactionCount: Int,
     val transferredInCents: Long = 0L,
-    val transferredOutCents: Long = 0L
+    val transferredOutCents: Long = 0L,
+    val addedFundsCents: Long = 0L
 ) {
     val hasStartingBalance: Boolean
         get() = account.initialBalanceCents > 0L
 
     val hasBalanceOrTransferActivity: Boolean
-        get() = account.initialBalanceCents > 0L || transferredInCents > 0L || transferredOutCents > 0L
+        get() = account.initialBalanceCents > 0L ||
+            addedFundsCents > 0L ||
+            transferredInCents > 0L ||
+            transferredOutCents > 0L
 
     val remainingBalanceCents: Long
-        get() = account.initialBalanceCents + transferredInCents - transferredOutCents - totalSpentCents
+        get() = account.initialBalanceCents +
+            addedFundsCents +
+            transferredInCents -
+            transferredOutCents -
+            totalSpentCents
+
+    fun dailyPaceCents(daysRemainingInMonth: Int): Long {
+        if (!hasBalanceOrTransferActivity) return 0L
+        val availableBeforeToday = (remainingBalanceCents + todaySpentCents).coerceAtLeast(0L)
+        return availableBeforeToday / daysRemainingInMonth.coerceAtLeast(1)
+    }
+}
+
+data class SevenDayTrendSnapshot(
+    val days: List<DailyDayBar>,
+    val totalCents: Long,
+    val dailyAverageCents: Long,
+    val previousSevenDaysTotalCents: Long,
+    val peakDay: DailyDayBar?,
+    val noSpendDaysCount: Int
+) {
+    val deltaPercentVsPriorWeek: Int?
+        get() = if (previousSevenDaysTotalCents <= 0L) {
+            null
+        } else {
+            (((totalCents - previousSevenDaysTotalCents).toDouble() / previousSevenDaysTotalCents.toDouble()) * 100.0).roundToInt()
+        }
 }
 
 data class ThirtyDayTrendSnapshot(
@@ -79,6 +111,14 @@ data class DailySummarySnapshot(
     val projectedMonthSpendCents: Long,
     val paceStatus: BudgetStatusLevel,
     val last7Days: List<DailyDayBar>,
+    val last7DaysTrend: SevenDayTrendSnapshot = SevenDayTrendSnapshot(
+        days = emptyList(),
+        totalCents = 0L,
+        dailyAverageCents = 0L,
+        previousSevenDaysTotalCents = 0L,
+        peakDay = null,
+        noSpendDaysCount = 0
+    ),
     val last30DaysTrend: ThirtyDayTrendSnapshot = ThirtyDayTrendSnapshot(
         days = emptyList(),
         totalCents = 0L,
@@ -90,7 +130,13 @@ data class DailySummarySnapshot(
     val activeBudgetAlerts: List<CategoryProgressItem>,
     val tips: List<FinancialInsightTip>,
     val underLimitStreakDays: Int,
-    val accountSummaries: List<AccountSummaryItem> = emptyList()
+    val accountSummaries: List<AccountSummaryItem> = emptyList(),
+    val totalAccountsRemainingCents: Long = 0L,
+    val balanceTrackedAccountsCount: Int = 0,
+    val todayAccountLinkedSpentCents: Long = 0L,
+    val accountDailyAllowanceCents: Long = 0L,
+    val accountTodayRemainingCents: Long = 0L,
+    val accountPaceStatus: BudgetStatusLevel = BudgetStatusLevel.ON_TRACK
 )
 
 object FinancialInsightsEngine {
@@ -101,7 +147,8 @@ object FinancialInsightsEngine {
         prefs: BudgetPreferences,
         nowMillis: Long = System.currentTimeMillis(),
         accounts: List<AccountEntity> = emptyList(),
-        transfers: List<AccountTransferEntity> = emptyList()
+        transfers: List<AccountTransferEntity> = emptyList(),
+        deposits: List<AccountDepositEntity> = emptyList()
     ): DailySummarySnapshot {
         val todayStart = DateUtils.startOfDayMillis(nowMillis)
         val todayEnd = DateUtils.endOfDayMillis(nowMillis)
@@ -160,6 +207,12 @@ object FinancialInsightsEngine {
                 spentCents = total
             )
         }
+
+        val last7DaysTrend = computeSevenDayTrend(
+            expenses = expenses,
+            nowMillis = nowMillis,
+            preGroupedByDayKey = byDayKey
+        )
 
         val last30DaysTrend = computeThirtyDayTrend(
             expenses = expenses,
@@ -238,6 +291,9 @@ object FinancialInsightsEngine {
             val acctTransferOut = transfers
                 .filter { it.fromAccountName.trim().equals(acct.name.trim(), ignoreCase = true) }
                 .sumOf { it.amountCents }
+            val acctAddedFunds = deposits
+                .filter { it.accountName.trim().equals(acct.name.trim(), ignoreCase = true) }
+                .sumOf { it.amountCents }
             AccountSummaryItem(
                 account = acct,
                 totalSpentCents = acctExpenses.sumOf { it.amountCents },
@@ -249,8 +305,35 @@ object FinancialInsightsEngine {
                     .sumOf { it.amountCents },
                 transactionCount = acctExpenses.size,
                 transferredInCents = acctTransferIn,
-                transferredOutCents = acctTransferOut
+                transferredOutCents = acctTransferOut,
+                addedFundsCents = acctAddedFunds
             )
+        }
+
+        val balanceTrackedAccounts = accountSummaries.filter { it.hasBalanceOrTransferActivity }
+        val totalAccountsRemainingCents = balanceTrackedAccounts.sumOf { it.remainingBalanceCents }
+        val todayAccountLinkedSpentCents = balanceTrackedAccounts.sumOf { it.todaySpentCents }
+        val accountAvailableBeforeTodayCents =
+            (totalAccountsRemainingCents + todayAccountLinkedSpentCents).coerceAtLeast(0L)
+        val accountDailyAllowanceCents = if (balanceTrackedAccounts.isNotEmpty()) {
+            accountAvailableBeforeTodayCents / daysRemaining
+        } else {
+            0L
+        }
+        val accountTodayRemainingCents = accountDailyAllowanceCents - todayAccountLinkedSpentCents
+        val accountPaceStatus = when {
+            balanceTrackedAccounts.isEmpty() -> BudgetStatusLevel.ON_TRACK
+            totalAccountsRemainingCents < 0L -> BudgetStatusLevel.EXCEEDED
+            accountDailyAllowanceCents > 0L -> {
+                val ratio = todayAccountLinkedSpentCents.toFloat() / accountDailyAllowanceCents.toFloat()
+                when {
+                    ratio >= 1.0f -> BudgetStatusLevel.EXCEEDED
+                    ratio >= 0.8f -> BudgetStatusLevel.APPROACHING
+                    else -> BudgetStatusLevel.ON_TRACK
+                }
+            }
+            todayAccountLinkedSpentCents > 0L -> BudgetStatusLevel.EXCEEDED
+            else -> BudgetStatusLevel.ON_TRACK
         }
 
         return DailySummarySnapshot(
@@ -267,12 +350,19 @@ object FinancialInsightsEngine {
             projectedMonthSpendCents = projectedMonthSpend,
             paceStatus = paceStatus,
             last7Days = last7Days,
+            last7DaysTrend = last7DaysTrend,
             last30DaysTrend = last30DaysTrend,
             categoryProgress = categoryProgress,
             activeBudgetAlerts = activeAlerts,
             tips = tips,
             underLimitStreakDays = streak,
-            accountSummaries = accountSummaries
+            accountSummaries = accountSummaries,
+            totalAccountsRemainingCents = totalAccountsRemainingCents,
+            balanceTrackedAccountsCount = balanceTrackedAccounts.size,
+            todayAccountLinkedSpentCents = todayAccountLinkedSpentCents,
+            accountDailyAllowanceCents = accountDailyAllowanceCents,
+            accountTodayRemainingCents = accountTodayRemainingCents,
+            accountPaceStatus = accountPaceStatus
         )
     }
 
@@ -301,6 +391,59 @@ object FinancialInsightsEngine {
             days = days,
             totalCents = totalCents,
             dailyAverageCents = avgCents,
+            peakDay = peakDay,
+            noSpendDaysCount = noSpendCount
+        )
+    }
+
+    fun computeSevenDayTrend(
+        expenses: List<ExpenseEntity>,
+        nowMillis: Long = System.currentTimeMillis(),
+        accountName: String? = null,
+        preGroupedByDayKey: Map<String, List<ExpenseEntity>>? = null
+    ): SevenDayTrendSnapshot {
+        val grouped = if (accountName != null) {
+            expenses
+                .filter { it.accountName.trim().equals(accountName.trim(), ignoreCase = true) }
+                .groupBy { DateUtils.dayKey(it.timestampMillis) }
+        } else {
+            preGroupedByDayKey ?: expenses.groupBy { DateUtils.dayKey(it.timestampMillis) }
+        }
+
+        val dayStarts14 = DateUtils.lastNDaysStarts(14, nowMillis)
+        val prior7Starts = dayStarts14.take(7)
+        val current7Starts = dayStarts14.takeLast(7)
+
+        val priorTotalCents = prior7Starts.sumOf { start ->
+            val key = DateUtils.dayKey(start)
+            grouped[key]?.sumOf { it.amountCents } ?: 0L
+        }
+
+        val days = current7Starts.map { start ->
+            val key = DateUtils.dayKey(start)
+            val total = grouped[key]?.sumOf { it.amountCents } ?: 0L
+            DailyDayBar(
+                dayStartMillis = start,
+                label = DateUtils.formatShortWeekday(start),
+                fullDateLabel = DateUtils.formatHeaderDate(start),
+                spentCents = total
+            )
+        }
+
+        val totalCents = days.sumOf { it.spentCents }
+        val avgCents = if (days.isNotEmpty()) {
+            (totalCents.toDouble() / days.size.toDouble()).roundToLong()
+        } else {
+            0L
+        }
+        val peakDay = days.maxByOrNull { it.spentCents }?.takeIf { it.spentCents > 0L }
+        val noSpendCount = days.count { it.spentCents == 0L }
+
+        return SevenDayTrendSnapshot(
+            days = days,
+            totalCents = totalCents,
+            dailyAverageCents = avgCents,
+            previousSevenDaysTotalCents = priorTotalCents,
             peakDay = peakDay,
             noSpendDaysCount = noSpendCount
         )

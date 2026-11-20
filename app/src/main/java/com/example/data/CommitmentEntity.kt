@@ -5,10 +5,12 @@ import androidx.room.PrimaryKey
 import com.example.model.CommitmentType
 import com.example.model.ExpenseCategory
 import com.example.model.RecurrenceCycle
+import java.util.UUID
 
 @Entity(tableName = "financial_commitments")
 data class CommitmentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
+    val remoteId: String = UUID.randomUUID().toString(),
     val title: String,
     val type: String = CommitmentType.DEBT.name,
     val amountCents: Long,
@@ -26,5 +28,6 @@ data class CommitmentEntity(
     val reminderEnabled: Boolean = true,
     val isActive: Boolean = true,
     val lastCompletedCycleKey: String = "",
-    val createdAtMillis: Long = System.currentTimeMillis()
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis()
 )

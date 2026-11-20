@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.data.AccountDepositEntity
 import com.example.data.AccountEntity
 import com.example.data.AccountTransferEntity
 import com.example.data.BudgetPreferences
@@ -351,6 +352,19 @@ class SpendWiseCoreUnitTest {
                 nowMillis = fixedNow
             )
         )
+
+        // 7. Banco Cuscatlán (El Salvador) Debit Card SMS with compact USD10.00 & Cuenta B.CUSCATLAN 7708
+        val cuscatlan = BankMessageParser.parse(
+            title = "22122",
+            body = "Alerta de consumo con Tarjeta de Debito con Cuenta B.CUSCATLAN 7708 por USD10.00 en SUPER7 PRESIDENCIAL el 2026-11-17 21:39. Mas inf. 22122000",
+            sourceAppLabel = "Messages",
+            nowMillis = fixedNow
+        )
+        assertNotNull(cuscatlan)
+        assertEquals(10_00L, cuscatlan!!.amountCents)
+        assertEquals("SUPER7 PRESIDENCIAL", cuscatlan.merchant)
+        assertEquals("7708", cuscatlan.cardLastFour)
+        assertEquals(PaymentMethod.CARD, cuscatlan.paymentMethod)
     }
 
     @Test
@@ -480,5 +494,238 @@ class SpendWiseCoreUnitTest {
         )
         assertEquals(0L, summary.todaySpentCents)
         assertEquals(500_00L, summary.accountSummaries.first().remainingBalanceCents)
+    }
+
+    @Test
+    fun accountsBalanceDrivesTodaySummaryAndPerAccountDailyPace() {
+        assertTrue(BudgetPreferences().todayUseAccountsBalance)
+
+        // Pin date to Nov 21 (10 days remaining in Nov: Nov 21..30 inclusive)
+        val cal = Calendar.getInstance().apply {
+            set(2026, Calendar.NOVEMBER, 21, 14, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val now = cal.timeInMillis
+
+        val accounts = listOf(
+            AccountEntity(id = 1, name = "Chequera", initialBalanceCents = 1_000_00L),
+            AccountEntity(id = 2, name = "Personal", initialBalanceCents = 0L),
+            AccountEntity(id = 3, name = "SpendOnly", initialBalanceCents = 0L)
+        )
+        val transfers = listOf(
+            // Move $300 from Chequera to Personal -> Personal becomes balance-tracked ($300)
+            AccountTransferEntity(
+                id = 1,
+                fromAccountName = "Chequera",
+                toAccountName = "Personal",
+                amountCents = 300_00L,
+                timestampMillis = now
+            )
+        )
+        val expenses = listOf(
+            // Spend $100 today on Chequera -> Chequera = 1000 - 300 - 100 = 600
+            ExpenseEntity(
+                id = 1,
+                description = "Groceries",
+                amountCents = 100_00L,
+                category = ExpenseCategory.GROCERIES.name,
+                paymentMethod = "CARD",
+                accountName = "Chequera",
+                timestampMillis = now
+            ),
+            // Spend $50 on SpendOnly (no balance/transfer) -> excluded from totalAccountsRemainingCents
+            ExpenseEntity(
+                id = 2,
+                description = "Parking",
+                amountCents = 50_00L,
+                category = ExpenseCategory.TRANSPORTATION.name,
+                paymentMethod = "CASH",
+                accountName = "SpendOnly",
+                timestampMillis = now
+            )
+        )
+
+        val summary = FinancialInsightsEngine.compute(
+            expenses = expenses,
+            categoryBudgets = emptyList(),
+            prefs = BudgetPreferences(),
+            nowMillis = now,
+            accounts = accounts,
+            transfers = transfers
+        )
+
+        assertEquals(10, summary.daysRemainingInMonth)
+        assertEquals(2, summary.balanceTrackedAccountsCount)
+        // Chequera ($600) + Personal ($300) = $900 remaining across accounts
+        assertEquals(900_00L, summary.totalAccountsRemainingCents)
+        assertEquals(100_00L, summary.todayAccountLinkedSpentCents)
+        assertEquals(150_00L, summary.todaySpentCents)
+        // Before today: $900 + $100 = $1,000 -> $1,000 / 10 days = $100/day safe
+        assertEquals(100_00L, summary.accountDailyAllowanceCents)
+        assertEquals(0L, summary.accountTodayRemainingCents)
+        assertEquals(BudgetStatusLevel.EXCEEDED, summary.accountPaceStatus)
+
+        val chequera = summary.accountSummaries.first { it.account.name == "Chequera" }
+        // Chequera before today: $600 + $100 = $700 -> $70/day
+        assertEquals(70_00L, chequera.dailyPaceCents(summary.daysRemainingInMonth))
+
+        val personal = summary.accountSummaries.first { it.account.name == "Personal" }
+        assertEquals(30_00L, personal.dailyPaceCents(summary.daysRemainingInMonth))
+
+        val spendOnly = summary.accountSummaries.first { it.account.name == "SpendOnly" }
+        assertFalse(spendOnly.hasBalanceOrTransferActivity)
+        assertEquals(0L, spendOnly.dailyPaceCents(summary.daysRemainingInMonth))
+    }
+
+    @Test
+    fun sevenDayTrendAnalyticsBucketsExpensesAndComparesPriorWeek() {
+        val cal = Calendar.getInstance().apply {
+            set(2026, Calendar.NOVEMBER, 18, 14, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val now = cal.timeInMillis
+        val dayMs = 24L * 60L * 60L * 1000L
+
+        val expenses = listOf(
+            // Today (Nov 18): $20 Chequera + $10 Personal = $30
+            ExpenseEntity(
+                id = 1,
+                description = "Lunch",
+                amountCents = 20_00L,
+                category = ExpenseCategory.FOOD_DINING.name,
+                paymentMethod = "BANK",
+                accountName = "Chequera",
+                timestampMillis = now
+            ),
+            ExpenseEntity(
+                id = 2,
+                description = "Coffee",
+                amountCents = 10_00L,
+                category = ExpenseCategory.FOOD_DINING.name,
+                paymentMethod = "CARD",
+                accountName = "Personal",
+                timestampMillis = now - 60_000L
+            ),
+            // 3 days ago (Nov 15): $40 Personal
+            ExpenseEntity(
+                id = 3,
+                description = "Supermarket",
+                amountCents = 40_00L,
+                category = ExpenseCategory.GROCERIES.name,
+                paymentMethod = "CARD",
+                accountName = "Personal",
+                timestampMillis = now - (3L * dayMs)
+            ),
+            // Prior 7-day window (9 days ago = Nov 9): $100 Chequera
+            ExpenseEntity(
+                id = 4,
+                description = "Electric Bill",
+                amountCents = 100_00L,
+                category = ExpenseCategory.UTILITIES.name,
+                paymentMethod = "BANK",
+                accountName = "Chequera",
+                timestampMillis = now - (9L * dayMs)
+            ),
+            // Outside 14-day window (20 days ago): ignored
+            ExpenseEntity(
+                id = 5,
+                description = "Old expense",
+                amountCents = 500_00L,
+                category = ExpenseCategory.OTHER.name,
+                paymentMethod = "CASH",
+                accountName = "Personal",
+                timestampMillis = now - (20L * dayMs)
+            )
+        )
+
+        val allTrend = FinancialInsightsEngine.computeSevenDayTrend(expenses, nowMillis = now)
+        assertEquals(7, allTrend.days.size)
+        assertEquals(70_00L, allTrend.totalCents)
+        assertEquals(10_00L, allTrend.dailyAverageCents)
+        assertEquals(100_00L, allTrend.previousSevenDaysTotalCents)
+        assertEquals(-30, allTrend.deltaPercentVsPriorWeek)
+        assertEquals(40_00L, allTrend.peakDay?.spentCents)
+        assertEquals(5, allTrend.noSpendDaysCount)
+        assertEquals(30_00L, allTrend.days.last().spentCents)
+
+        val personalTrend = FinancialInsightsEngine.computeSevenDayTrend(
+            expenses = expenses,
+            nowMillis = now,
+            accountName = "personal"
+        )
+        assertEquals(50_00L, personalTrend.totalCents)
+        assertEquals(0L, personalTrend.previousSevenDaysTotalCents)
+        assertNull(personalTrend.deltaPercentVsPriorWeek)
+        assertEquals(40_00L, personalTrend.peakDay?.spentCents)
+    }
+
+    @Test
+    fun addedFundsIncreaseAccountBalancesWithoutCountingAsExpenses() {
+        val now = System.currentTimeMillis()
+        val accounts = listOf(
+            AccountEntity(id = 1, name = "Chequera", initialBalanceCents = 55_00L),
+            AccountEntity(id = 2, name = "Wallet", initialBalanceCents = 15_00L),
+            AccountEntity(id = 3, name = "Side Gig", initialBalanceCents = 0L)
+        )
+        val deposits = listOf(
+            AccountDepositEntity(
+                id = 1,
+                accountName = "chequera",
+                source = "Friend paid me back",
+                amountCents = 5_00L,
+                timestampMillis = now,
+                note = "Paid for him a couple days ago"
+            ),
+            AccountDepositEntity(
+                id = 2,
+                accountName = "Wallet",
+                source = "Uber",
+                amountCents = 15_00L,
+                timestampMillis = now
+            ),
+            AccountDepositEntity(
+                id = 3,
+                accountName = "Side Gig",
+                source = "Weekend tutoring",
+                amountCents = 40_00L,
+                timestampMillis = now
+            )
+        )
+
+        val summary = FinancialInsightsEngine.compute(
+            expenses = emptyList(),
+            categoryBudgets = emptyList(),
+            prefs = BudgetPreferences(),
+            nowMillis = now,
+            accounts = accounts,
+            deposits = deposits
+        )
+
+        // Added funds must NEVER count as expenses
+        assertEquals(0L, summary.todaySpentCents)
+        assertEquals(0L, summary.weekSpentCents)
+        assertEquals(0L, summary.monthSpentCents)
+
+        // Example 1: $55.00 + $5.00 friend payback = $60.00
+        val chequera = summary.accountSummaries.first { it.account.name == "Chequera" }
+        assertEquals(5_00L, chequera.addedFundsCents)
+        assertEquals(60_00L, chequera.remainingBalanceCents)
+        assertTrue(chequera.hasBalanceOrTransferActivity)
+
+        // Example 2: $15.00 + $15.00 Uber payout = $30.00
+        val wallet = summary.accountSummaries.first { it.account.name == "Wallet" }
+        assertEquals(15_00L, wallet.addedFundsCents)
+        assertEquals(30_00L, wallet.remainingBalanceCents)
+        assertTrue(wallet.hasBalanceOrTransferActivity)
+
+        // Zero-starting-balance account receiving funds becomes balance-tracked
+        val sideGig = summary.accountSummaries.first { it.account.name == "Side Gig" }
+        assertEquals(40_00L, sideGig.addedFundsCents)
+        assertEquals(40_00L, sideGig.remainingBalanceCents)
+        assertTrue(sideGig.hasBalanceOrTransferActivity)
+
+        // Total available across all 3 accounts = $60 + $30 + $40 = $130.00
+        assertEquals(3, summary.balanceTrackedAccountsCount)
+        assertEquals(130_00L, summary.totalAccountsRemainingCents)
     }
 }

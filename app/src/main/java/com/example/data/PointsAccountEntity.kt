@@ -4,11 +4,13 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 import java.text.NumberFormat
 import java.util.Locale
+import java.util.UUID
 
 @Entity(tableName = "points_accounts")
 data class PointsAccountEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0L,
+    val remoteId: String = UUID.randomUUID().toString(),
     val name: String,
     val pointsBalance: Long = 0L,
     val unitLabel: String = "pts",

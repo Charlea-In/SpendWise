@@ -244,3 +244,122 @@ fun EditMonthlyBudgetDialog(
         }
     )
 }
+
+@Composable
+fun TodayBalanceSourceDialog(
+    useAccountsBalance: Boolean,
+    balanceAccountsCount: Int,
+    totalAccountsBalanceCents: Long,
+    currencySymbol: String,
+    onDismiss: () -> Unit,
+    onSelectSource: (useAccounts: Boolean) -> Unit,
+    onManageAccounts: () -> Unit,
+    onEditMonthlyBudget: () -> Unit
+) {
+    var selectedUseAccounts by remember(useAccountsBalance) { mutableStateOf(useAccountsBalance) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Today Screen Source") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Choose what drives the main card on your Today screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = selectedUseAccounts,
+                        onClick = { selectedUseAccounts = true },
+                        modifier = Modifier.testTag("today_source_accounts_radio")
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Money in Accounts",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = if (balanceAccountsCount > 0) {
+                                "$balanceAccountsCount account(s) • ${MoneyFormatter.format(totalAccountsBalanceCents, currencySymbol)} available"
+                            } else {
+                                "Uses remaining balances from your custom accounts instead of a budget."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = !selectedUseAccounts,
+                        onClick = { selectedUseAccounts = false },
+                        modifier = Modifier.testTag("today_source_budget_radio")
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Monthly Budget Plan",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = "Calculates daily safe-to-spend from a fixed monthly budget.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                if (selectedUseAccounts) {
+                    OutlinedButton(
+                        onClick = {
+                            onDismiss()
+                            onManageAccounts()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("today_source_add_account_button")
+                    ) {
+                        Text(if (balanceAccountsCount == 0) "Add Account with Balance" else "Add New Account")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = {
+                            onSelectSource(false)
+                            onDismiss()
+                            onEditMonthlyBudget()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("today_source_edit_budget_button")
+                    ) {
+                        Text("Edit Monthly Budget")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSelectSource(selectedUseAccounts)
+                    onDismiss()
+                },
+                modifier = Modifier.testTag("save_today_source_button")
+            ) {
+                Text("Apply")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}

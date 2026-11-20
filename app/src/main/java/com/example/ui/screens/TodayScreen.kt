@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -73,7 +74,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -93,6 +98,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.R
+import com.example.data.AccountDepositEntity
 import com.example.data.AccountEntity
 import com.example.data.AccountTransferEntity
 import com.example.data.CommitmentEntity
@@ -105,6 +111,7 @@ import com.example.model.DefaultQuickPresets
 import com.example.model.ExpenseCategory
 import com.example.model.QuickPreset
 import com.example.ui.components.BudgetAlertBannerCard
+import com.example.ui.components.DepositRowCard
 import com.example.ui.components.ExpenseRowCard
 import com.example.ui.components.TransferRowCard
 import com.example.ui.theme.AmountDisplayStyle
@@ -129,15 +136,18 @@ fun TodayScreen(
     onOpenPlansTab: () -> Unit,
     onCreateCommitment: (CommitmentType) -> Unit,
     onRecordCommitmentPayment: (CommitmentEntity, Boolean) -> Unit,
-    onEditMonthlyPlan: () -> Unit,
+    onOpenTodaySourceDialog: () -> Unit,
     onOpenSheetSyncDialog: () -> Unit,
     onToggleDemoMode: (Boolean) -> Unit,
     onSelectTodayAccount: (String?) -> Unit,
     onCreateAccount: () -> Unit,
     onEditAccount: (AccountEntity) -> Unit,
+    onAddFundsClick: (AccountEntity?) -> Unit,
     onTransferClick: () -> Unit,
     onEditTransfer: (AccountTransferEntity) -> Unit,
     onDeleteTransfer: (AccountTransferEntity) -> Unit,
+    onEditDeposit: (AccountDepositEntity) -> Unit,
+    onDeleteDeposit: (AccountDepositEntity) -> Unit,
     onCreatePointsAccount: () -> Unit,
     onEditPointsAccount: (PointsAccountEntity) -> Unit,
     onGeminiPromptChanged: (String) -> Unit,
@@ -152,6 +162,7 @@ fun TodayScreen(
     onDismissDetectedCharge: (DetectedTransactionEntity) -> Unit,
     onOpenBankMessageDialog: () -> Unit,
     onPermissionResult: () -> Unit,
+    voiceTriggerSignal: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -173,6 +184,20 @@ fun TodayScreen(
             onStartVoiceRecording()
         } else {
             onVoicePermissionDenied()
+        }
+    }
+
+    LaunchedEffect(voiceTriggerSignal) {
+        if (voiceTriggerSignal > 0 && prefs.geminiAssistEnabled) {
+            val hasMicPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasMicPermission) {
+                onStartVoiceRecording()
+            } else {
+                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
     }
 
@@ -240,14 +265,14 @@ fun TodayScreen(
                     )
 
                     IconButton(
-                        onClick = onEditMonthlyPlan,
+                        onClick = onOpenTodaySourceDialog,
                         modifier = Modifier
                             .minimumInteractiveComponentSize()
                             .testTag("today_edit_plan_button")
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Tune,
-                            contentDescription = "Edit monthly budget plan",
+                            contentDescription = "Configure Today balance source",
                             tint = MaterialTheme.colorScheme.onBackground
                         )
                     }
@@ -302,109 +327,354 @@ fun TodayScreen(
             }
         }
 
-        // Daily Safe-to-Spend Hero Card
+        // Daily Hero Card (Account Balances by default, or Monthly Budget if switched)
         item {
-            val isOver = summary.todayRemainingCents < 0L
-            val paceLabel = when (summary.paceStatus) {
-                BudgetStatusLevel.ON_TRACK -> "On Pace"
-                BudgetStatusLevel.APPROACHING -> "Close to Daily Limit"
-                BudgetStatusLevel.EXCEEDED -> "Over Daily Pace"
-            }
-            val progress = if (summary.dailyAllowanceCents > 0L) {
-                (summary.todaySpentCents.toFloat() / summary.dailyAllowanceCents.toFloat()).coerceIn(0f, 1f)
-            } else {
-                if (summary.todaySpentCents > 0L) 1f else 0f
-            }
+            if (prefs.todayUseAccountsBalance) {
+                val selectedAcctSummary = uiState.selectedTodayAccount?.let { selectedName ->
+                    summary.accountSummaries.firstOrNull {
+                        it.account.name.equals(selectedName, ignoreCase = true)
+                    }
+                }
 
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("daily_allowance_hero_card"),
-                shape = MaterialTheme.shapes.extraLarge,
-                shadowElevation = 4.dp
-            ) {
-                Box(
+                val heroTopLabel: String
+                val heroBadgeText: String
+                val heroBadgeStatus: BudgetStatusLevel
+                val heroAmountText: String
+                val heroProgress: Float
+                val heroHelperNote: String?
+                val heroActionLabel: String?
+                val heroActionClick: (() -> Unit)?
+                val metric2Label: String
+                val metric2Value: String
+                val metric1Value: String
+
+                if (selectedAcctSummary != null) {
+                    if (selectedAcctSummary.hasBalanceOrTransferActivity) {
+                        val acctBal = selectedAcctSummary.remainingBalanceCents
+                        val isOverdrawn = acctBal < 0L
+                        val dailyPace = selectedAcctSummary.dailyPaceCents(summary.daysRemainingInMonth)
+                        val acctToday = selectedAcctSummary.todaySpentCents
+                        val ratio = if (dailyPace > 0L) acctToday.toFloat() / dailyPace.toFloat() else 0f
+
+                        heroBadgeStatus = when {
+                            isOverdrawn -> BudgetStatusLevel.EXCEEDED
+                            dailyPace > 0L && ratio >= 1.0f -> BudgetStatusLevel.EXCEEDED
+                            dailyPace > 0L && ratio >= 0.8f -> BudgetStatusLevel.APPROACHING
+                            dailyPace == 0L && acctToday > 0L -> BudgetStatusLevel.EXCEEDED
+                            else -> BudgetStatusLevel.ON_TRACK
+                        }
+                        heroTopLabel = if (isOverdrawn) {
+                            "${selectedAcctSummary.account.name} overdrawn by"
+                        } else {
+                            "${selectedAcctSummary.account.name} available"
+                        }
+                        val paceCompact = MoneyFormatter.format(dailyPace, currency, compactWhole = true)
+                        heroBadgeText = when {
+                            isOverdrawn -> "Overdrawn"
+                            heroBadgeStatus == BudgetStatusLevel.EXCEEDED && dailyPace > 0L -> "Above $paceCompact/d pace"
+                            heroBadgeStatus == BudgetStatusLevel.APPROACHING && dailyPace > 0L -> "Near $paceCompact/d pace"
+                            dailyPace > 0L -> "~$paceCompact/day safe"
+                            else -> "Account Balance"
+                        }
+                        heroAmountText = MoneyFormatter.format(abs(acctBal), currency)
+                        heroProgress = if (isOverdrawn) 1f else ratio.coerceIn(0f, 1f)
+                        heroHelperNote = null
+                        heroActionLabel = null
+                        heroActionClick = null
+                        metric1Value = MoneyFormatter.format(acctToday, currency)
+                        metric2Label = "Safe / Day"
+                        metric2Value = MoneyFormatter.format(dailyPace, currency)
+                    } else {
+                        heroTopLabel = "${selectedAcctSummary.account.name} • No balance set"
+                        heroBadgeStatus = BudgetStatusLevel.ON_TRACK
+                        heroBadgeText = "Spend-only"
+                        heroAmountText = MoneyFormatter.format(selectedAcctSummary.totalSpentCents, currency)
+                        heroProgress = 0f
+                        heroHelperNote = "Total spent on ${selectedAcctSummary.account.name}. Add a starting balance to track remaining money."
+                        heroActionLabel = "Set Starting Balance"
+                        heroActionClick = { onEditAccount(selectedAcctSummary.account) }
+                        metric1Value = MoneyFormatter.format(selectedAcctSummary.todaySpentCents, currency)
+                        metric2Label = "Month Spent"
+                        metric2Value = MoneyFormatter.format(selectedAcctSummary.monthSpentCents, currency)
+                    }
+                } else if (summary.balanceTrackedAccountsCount > 0) {
+                    val totalBal = summary.totalAccountsRemainingCents
+                    val isOverdrawn = totalBal < 0L
+                    val dailyPace = summary.accountDailyAllowanceCents
+                    val paceCompact = MoneyFormatter.format(dailyPace, currency, compactWhole = true)
+
+                    heroBadgeStatus = summary.accountPaceStatus
+                    heroTopLabel = if (isOverdrawn) {
+                        "Accounts overdrawn by"
+                    } else {
+                        "Available across accounts"
+                    }
+                    heroBadgeText = when {
+                        isOverdrawn -> "Overdrawn"
+                        heroBadgeStatus == BudgetStatusLevel.EXCEEDED && dailyPace > 0L -> "Above $paceCompact/d pace"
+                        heroBadgeStatus == BudgetStatusLevel.APPROACHING && dailyPace > 0L -> "Near $paceCompact/d pace"
+                        dailyPace > 0L -> "~$paceCompact/day safe"
+                        else -> "${summary.balanceTrackedAccountsCount} account(s)"
+                    }
+                    heroAmountText = MoneyFormatter.format(abs(totalBal), currency)
+                    heroProgress = when {
+                        isOverdrawn -> 1f
+                        dailyPace > 0L -> (summary.todayAccountLinkedSpentCents.toFloat() / dailyPace.toFloat()).coerceIn(0f, 1f)
+                        summary.todayAccountLinkedSpentCents > 0L -> 1f
+                        else -> 0f
+                    }
+                    heroHelperNote = null
+                    heroActionLabel = null
+                    heroActionClick = null
+                    metric1Value = MoneyFormatter.format(summary.todaySpentCents, currency)
+                    metric2Label = "Safe / Day"
+                    metric2Value = MoneyFormatter.format(dailyPace, currency)
+                } else {
+                    heroTopLabel = "Money in Accounts"
+                    heroBadgeStatus = BudgetStatusLevel.ON_TRACK
+                    heroBadgeText = "Add Balance"
+                    heroAmountText = MoneyFormatter.format(0L, currency)
+                    heroProgress = 0f
+                    val firstAccount = summary.accountSummaries.firstOrNull()?.account
+                    heroHelperNote = if (firstAccount == null) {
+                        "Add an account with your current money so Today shows your available balance."
+                    } else {
+                        "Add a starting balance to ${firstAccount.name} or another account to track available money here."
+                    }
+                    heroActionLabel = if (firstAccount == null) "Add Account Balance" else "Set Account Balance"
+                    heroActionClick = if (firstAccount == null) {
+                        onCreateAccount
+                    } else {
+                        { onEditAccount(firstAccount) }
+                    }
+                    metric1Value = MoneyFormatter.format(summary.todaySpentCents, currency)
+                    metric2Label = "Month Spent"
+                    metric2Value = MoneyFormatter.format(summary.monthSpentCents, currency)
+                }
+
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(
-                            Brush.linearGradient(
-                                listOf(semanticColors.heroStart, semanticColors.heroEnd)
-                            )
-                        )
-                        .padding(20.dp)
+                        .testTag("daily_allowance_hero_card"),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    shadowElevation = 4.dp
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = if (isOver) "Over today's allowance by" else "Safe to spend today",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = Color.White.copy(alpha = 0.86f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(semanticColors.heroStart, semanticColors.heroEnd)
+                                )
                             )
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = when (summary.paceStatus) {
-                                    BudgetStatusLevel.ON_TRACK -> Color.White.copy(alpha = 0.18f)
-                                    BudgetStatusLevel.APPROACHING -> semanticColors.warningContainer
-                                    BudgetStatusLevel.EXCEEDED -> semanticColors.dangerContainer
-                                }
+                            .padding(20.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = paceLabel,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = when (summary.paceStatus) {
+                                    text = heroTopLabel,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = Color.White.copy(alpha = 0.86f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = when (heroBadgeStatus) {
+                                        BudgetStatusLevel.ON_TRACK -> Color.White.copy(alpha = 0.18f)
+                                        BudgetStatusLevel.APPROACHING -> semanticColors.warningContainer
+                                        BudgetStatusLevel.EXCEEDED -> semanticColors.dangerContainer
+                                    }
+                                ) {
+                                    Text(
+                                        text = heroBadgeText,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = when (heroBadgeStatus) {
+                                            BudgetStatusLevel.ON_TRACK -> Color.White
+                                            BudgetStatusLevel.APPROACHING -> semanticColors.warning
+                                            BudgetStatusLevel.EXCEEDED -> semanticColors.danger
+                                        },
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = heroAmountText,
+                                style = AmountDisplayStyle,
+                                color = Color.White
+                            )
+
+                            if (heroHelperNote != null && heroActionLabel != null && heroActionClick != null) {
+                                Text(
+                                    text = heroHelperNote,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.86f)
+                                )
+                                Button(
+                                    onClick = heroActionClick,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color.White,
+                                        contentColor = semanticColors.heroStart
+                                    ),
+                                    modifier = Modifier
+                                        .height(44.dp)
+                                        .testTag("today_hero_add_account_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(heroActionLabel)
+                                }
+                            } else {
+                                LinearProgressIndicator(
+                                    progress = { heroProgress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    color = when (heroBadgeStatus) {
                                         BudgetStatusLevel.ON_TRACK -> Color.White
-                                        BudgetStatusLevel.APPROACHING -> semanticColors.warning
-                                        BudgetStatusLevel.EXCEEDED -> semanticColors.danger
+                                        BudgetStatusLevel.APPROACHING -> semanticColors.warningContainer
+                                        BudgetStatusLevel.EXCEEDED -> semanticColors.dangerContainer
                                     },
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    trackColor = Color.White.copy(alpha = 0.22f),
+                                    strokeCap = StrokeCap.Round
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                HeroMetricItem(
+                                    label = "Spent Today",
+                                    value = metric1Value
+                                )
+                                HeroMetricItem(
+                                    label = metric2Label,
+                                    value = metric2Value
+                                )
+                                HeroMetricItem(
+                                    label = "Days Left",
+                                    value = "${summary.daysRemainingInMonth}d"
                                 )
                             }
                         }
+                    }
+                }
+            } else {
+                val isOver = summary.todayRemainingCents < 0L
+                val paceLabel = when (summary.paceStatus) {
+                    BudgetStatusLevel.ON_TRACK -> "On Pace"
+                    BudgetStatusLevel.APPROACHING -> "Close to Daily Limit"
+                    BudgetStatusLevel.EXCEEDED -> "Over Daily Pace"
+                }
+                val progress = if (summary.dailyAllowanceCents > 0L) {
+                    (summary.todaySpentCents.toFloat() / summary.dailyAllowanceCents.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    if (summary.todaySpentCents > 0L) 1f else 0f
+                }
 
-                        Text(
-                            text = MoneyFormatter.format(
-                                cents = kotlin.math.abs(summary.todayRemainingCents),
-                                currencySymbol = currency
-                            ),
-                            style = AmountDisplayStyle,
-                            color = Color.White
-                        )
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("daily_allowance_hero_card"),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    shadowElevation = 4.dp
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(semanticColors.heroStart, semanticColors.heroEnd)
+                                )
+                            )
+                            .padding(20.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (isOver) "Over today's allowance by" else "Safe to spend today",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = Color.White.copy(alpha = 0.86f)
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = when (summary.paceStatus) {
+                                        BudgetStatusLevel.ON_TRACK -> Color.White.copy(alpha = 0.18f)
+                                        BudgetStatusLevel.APPROACHING -> semanticColors.warningContainer
+                                        BudgetStatusLevel.EXCEEDED -> semanticColors.dangerContainer
+                                    }
+                                ) {
+                                    Text(
+                                        text = paceLabel,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = when (summary.paceStatus) {
+                                            BudgetStatusLevel.ON_TRACK -> Color.White
+                                            BudgetStatusLevel.APPROACHING -> semanticColors.warning
+                                            BudgetStatusLevel.EXCEEDED -> semanticColors.danger
+                                        },
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
 
-                        LinearProgressIndicator(
-                            progress = { progress },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(8.dp)
-                                .clip(RoundedCornerShape(4.dp)),
-                            color = when (summary.paceStatus) {
-                                BudgetStatusLevel.ON_TRACK -> Color.White
-                                BudgetStatusLevel.APPROACHING -> semanticColors.warningContainer
-                                BudgetStatusLevel.EXCEEDED -> semanticColors.dangerContainer
-                            },
-                            trackColor = Color.White.copy(alpha = 0.22f),
-                            strokeCap = StrokeCap.Round
-                        )
+                            Text(
+                                text = MoneyFormatter.format(
+                                    cents = abs(summary.todayRemainingCents),
+                                    currencySymbol = currency
+                                ),
+                                style = AmountDisplayStyle,
+                                color = Color.White
+                            )
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            HeroMetricItem(
-                                label = "Spent Today",
-                                value = MoneyFormatter.format(summary.todaySpentCents, currency)
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp)),
+                                color = when (summary.paceStatus) {
+                                    BudgetStatusLevel.ON_TRACK -> Color.White
+                                    BudgetStatusLevel.APPROACHING -> semanticColors.warningContainer
+                                    BudgetStatusLevel.EXCEEDED -> semanticColors.dangerContainer
+                                },
+                                trackColor = Color.White.copy(alpha = 0.22f),
+                                strokeCap = StrokeCap.Round
                             )
-                            HeroMetricItem(
-                                label = if (summary.weeklyRemainingCents < 0L) "Week Over" else "Week Balance",
-                                value = MoneyFormatter.format(kotlin.math.abs(summary.weeklyRemainingCents), currency)
-                            )
-                            HeroMetricItem(
-                                label = "Days Left",
-                                value = "${summary.daysRemainingInMonth}d"
-                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                HeroMetricItem(
+                                    label = "Spent Today",
+                                    value = MoneyFormatter.format(summary.todaySpentCents, currency)
+                                )
+                                HeroMetricItem(
+                                    label = if (summary.weeklyRemainingCents < 0L) "Week Over" else "Week Balance",
+                                    value = MoneyFormatter.format(abs(summary.weeklyRemainingCents), currency)
+                                )
+                                HeroMetricItem(
+                                    label = "Days Left",
+                                    value = "${summary.daysRemainingInMonth}d"
+                                )
+                            }
                         }
                     }
                 }
@@ -438,35 +708,57 @@ fun TodayScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    TextButton(
+                        onClick = onCreateAccount,
+                        modifier = Modifier.testTag("today_add_account_button")
                     ) {
-                        TextButton(
-                            onClick = onTransferClick,
-                            modifier = Modifier.testTag("today_transfer_button")
-                        ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("New")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AssistChip(
+                        onClick = {
+                            val selectedAcct = uiState.selectedTodayAccount?.let { sel ->
+                                uiState.accounts.firstOrNull { it.name.equals(sel, ignoreCase = true) }
+                            }
+                            onAddFundsClick(selectedAcct)
+                        },
+                        label = { Text("Add funds") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.AddCircleOutline,
+                                contentDescription = null,
+                                tint = semanticColors.positive,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        modifier = Modifier.testTag("today_add_funds_button")
+                    )
+                    AssistChip(
+                        onClick = onTransferClick,
+                        label = { Text("Transfer") },
+                        leadingIcon = {
                             Icon(
                                 imageVector = Icons.Rounded.SwapHoriz,
                                 contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Transfer")
-                        }
-                        TextButton(
-                            onClick = onCreateAccount,
-                            modifier = Modifier.testTag("today_add_account_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("New")
-                        }
-                    }
+                        },
+                        modifier = Modifier.testTag("today_transfer_button")
+                    )
                 }
 
                 if (summary.accountSummaries.isEmpty()) {
@@ -539,16 +831,34 @@ fun TodayScreen(
                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                                Text(
-                                    text = MoneyFormatter.format(summary.todaySpentCents, currency),
-                                    style = AmountRowStyle,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    text = "Today total",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                if (summary.balanceTrackedAccountsCount > 0) {
+                                    val isNegAll = summary.totalAccountsRemainingCents < 0L
+                                    Text(
+                                        text = if (isNegAll) {
+                                            "-${MoneyFormatter.format(abs(summary.totalAccountsRemainingCents), currency)}"
+                                        } else {
+                                            MoneyFormatter.format(summary.totalAccountsRemainingCents, currency)
+                                        },
+                                        style = AmountRowStyle,
+                                        color = if (isNegAll) semanticColors.danger else semanticColors.positive
+                                    )
+                                    Text(
+                                        text = "Today ${MoneyFormatter.format(summary.todaySpentCents, currency)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    Text(
+                                        text = MoneyFormatter.format(summary.todaySpentCents, currency),
+                                        style = AmountRowStyle,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "Today total",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
 
@@ -628,6 +938,15 @@ fun TodayScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (item.addedFundsCents > 0L) {
+                                        Text(
+                                            text = "Funds +${MoneyFormatter.format(item.addedFundsCents, currency, compactWhole = true)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = semanticColors.positive,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                     if (item.transferredInCents > 0L || item.transferredOutCents > 0L) {
                                         val transferParts = buildList {
                                             if (item.transferredInCents > 0L) {
@@ -643,6 +962,26 @@ fun TodayScreen(
                                             color = MaterialTheme.colorScheme.primary,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = { onAddFundsClick(item.account) },
+                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                                        modifier = Modifier
+                                            .height(34.dp)
+                                            .testTag("today_add_funds_account_${item.account.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.AddCircleOutline,
+                                            contentDescription = "Add funds to ${item.account.name}",
+                                            tint = semanticColors.positive,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "Add funds",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = semanticColors.positive
                                         )
                                     }
                                 }
@@ -1398,8 +1737,8 @@ fun TodayScreen(
                                     placeholder = {
                                         Text("e.g., Bought a churro for 0.50 on account chequera")
                                     },
-                                    singleLine = false,
-                                    maxLines = 3,
+                                    singleLine = true,
+                                    maxLines = 1,
                                     keyboardOptions = KeyboardOptions(
                                         capitalization = KeyboardCapitalization.Sentences,
                                         imeAction = ImeAction.Send
@@ -1901,6 +2240,47 @@ fun TodayScreen(
                     currencySymbol = currency,
                     onClick = { onEditTransfer(transfer) },
                     onDelete = { onDeleteTransfer(transfer) }
+                )
+            }
+        }
+
+        // Today's Added Funds (never counted as expenses)
+        if (uiState.todayDeposits.isNotEmpty()) {
+            item {
+                val depositsTotal = uiState.todayDeposits.sumOf { it.amountCents }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Today's Added Funds (${uiState.todayDeposits.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Text(
+                            text = "Money received into accounts (not counted as spending)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "+${MoneyFormatter.format(depositsTotal, currency)}",
+                        style = AmountRowStyle,
+                        color = semanticColors.positive
+                    )
+                }
+            }
+
+            items(uiState.todayDeposits, key = { "today_deposit_${it.id}" }) { deposit ->
+                DepositRowCard(
+                    deposit = deposit,
+                    currencySymbol = currency,
+                    onClick = { onEditDeposit(deposit) },
+                    onDelete = { onDeleteDeposit(deposit) }
                 )
             }
         }

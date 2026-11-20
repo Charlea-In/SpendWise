@@ -12,4 +12,8 @@
     <string name="cd_budget_banner">Decorative layered emerald and gold ledger background</string>
     <string name="widget_balance_description">View your daily and weekly safe-to-spend balance at a glance</string>
     <string name="bank_listener_service_label">SpendWise Bank Charge Reader</string>
+    <string name="shortcut_voice_log_short">Voice Log</string>
+    <string name="shortcut_voice_log_long">Log expense by voice</string>
+    <string name="shortcut_quick_log_short">Log Expense</string>
+    <string name="shortcut_quick_log_long">Add a new expense</string>
 </resources>

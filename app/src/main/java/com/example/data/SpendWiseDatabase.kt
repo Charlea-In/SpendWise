@@ -15,9 +15,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CommitmentEntity::class,
         DetectedTransactionEntity::class,
         AccountTransferEntity::class,
-        PointsAccountEntity::class
+        PointsAccountEntity::class,
+        AccountDepositEntity::class
     ],
-    version = 8,
+    version = 10,
     exportSchema = false
 )
 abstract class SpendWiseDatabase : RoomDatabase() {
@@ -28,6 +29,7 @@ abstract class SpendWiseDatabase : RoomDatabase() {
     abstract fun detectedTransactionDao(): DetectedTransactionDao
     abstract fun accountTransferDao(): AccountTransferDao
     abstract fun pointsAccountDao(): PointsAccountDao
+    abstract fun accountDepositDao(): AccountDepositDao
 
     companion object {
         @Volatile
@@ -126,6 +128,45 @@ abstract class SpendWiseDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `account_deposits` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `accountName` TEXT NOT NULL,
+                        `source` TEXT NOT NULL,
+                        `amountCents` INTEGER NOT NULL,
+                        `timestampMillis` INTEGER NOT NULL,
+                        `note` TEXT NOT NULL,
+                        `isDemo` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `expenses` ADD COLUMN `updatedAtMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `category_budgets` ADD COLUMN `updatedAtMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `accounts` ADD COLUMN `remoteId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `accounts` ADD COLUMN `updatedAtMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE `accounts` SET `remoteId` = lower(hex(randomblob(16))) WHERE `remoteId` = ''")
+                db.execSQL("ALTER TABLE `account_transfers` ADD COLUMN `remoteId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `account_transfers` ADD COLUMN `updatedAtMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE `account_transfers` SET `remoteId` = lower(hex(randomblob(16))) WHERE `remoteId` = ''")
+                db.execSQL("ALTER TABLE `account_deposits` ADD COLUMN `remoteId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `account_deposits` ADD COLUMN `updatedAtMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE `account_deposits` SET `remoteId` = lower(hex(randomblob(16))) WHERE `remoteId` = ''")
+                db.execSQL("ALTER TABLE `points_accounts` ADD COLUMN `remoteId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE `points_accounts` SET `remoteId` = lower(hex(randomblob(16))) WHERE `remoteId` = ''")
+                db.execSQL("ALTER TABLE `financial_commitments` ADD COLUMN `remoteId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `financial_commitments` ADD COLUMN `updatedAtMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE `financial_commitments` SET `remoteId` = lower(hex(randomblob(16))) WHERE `remoteId` = ''")
+            }
+        }
+
         fun getInstance(context: Context): SpendWiseDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -133,7 +174,14 @@ abstract class SpendWiseDatabase : RoomDatabase() {
                     SpendWiseDatabase::class.java,
                     "spendwise_db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(
+                        MIGRATION_4_5,
+                        MIGRATION_5_6,
+                        MIGRATION_6_7,
+                        MIGRATION_7_8,
+                        MIGRATION_8_9,
+                        MIGRATION_9_10
+                    )
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

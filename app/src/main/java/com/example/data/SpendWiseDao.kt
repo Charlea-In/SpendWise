@@ -36,11 +36,11 @@ interface ExpenseDao {
     @Update
     suspend fun updateExpense(expense: ExpenseEntity)
 
-    @Query("UPDATE expenses SET accountName = :newName WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:oldName))")
-    suspend fun renameAccountExpenses(oldName: String, newName: String)
+    @Query("UPDATE expenses SET accountName = :newName, updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:oldName))")
+    suspend fun renameAccountExpenses(oldName: String, newName: String, updatedAtMillis: Long = System.currentTimeMillis())
 
-    @Query("UPDATE expenses SET accountName = '' WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:accountName))")
-    suspend fun clearAccountFromExpenses(accountName: String)
+    @Query("UPDATE expenses SET accountName = '', updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:accountName))")
+    suspend fun clearAccountFromExpenses(accountName: String, updatedAtMillis: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM expenses WHERE id = :id")
     suspend fun deleteExpenseById(id: Long)
@@ -62,6 +62,12 @@ interface AccountDao {
 
     @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1")
     suspend fun getAccountById(id: Long): AccountEntity?
+
+    @Query("SELECT * FROM accounts WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getAccountByRemoteId(remoteId: String): AccountEntity?
+
+    @Query("SELECT * FROM accounts WHERE isDemo = 0 ORDER BY createdAtMillis ASC, id ASC")
+    suspend fun getNonDemoAccounts(): List<AccountEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAccount(account: AccountEntity): Long
@@ -117,17 +123,20 @@ interface CommitmentDao {
     @Query("SELECT * FROM financial_commitments WHERE id = :id LIMIT 1")
     suspend fun getCommitmentById(id: Long): CommitmentEntity?
 
+    @Query("SELECT * FROM financial_commitments WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getByRemoteId(remoteId: String): CommitmentEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCommitment(commitment: CommitmentEntity): Long
 
     @Update
     suspend fun updateCommitment(commitment: CommitmentEntity)
 
-    @Query("UPDATE financial_commitments SET accountName = :newName WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:oldName))")
-    suspend fun renameAccountCommitments(oldName: String, newName: String)
+    @Query("UPDATE financial_commitments SET accountName = :newName, updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:oldName))")
+    suspend fun renameAccountCommitments(oldName: String, newName: String, updatedAtMillis: Long = System.currentTimeMillis())
 
-    @Query("UPDATE financial_commitments SET accountName = '' WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:accountName))")
-    suspend fun clearAccountFromCommitments(accountName: String)
+    @Query("UPDATE financial_commitments SET accountName = '', updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:accountName))")
+    suspend fun clearAccountFromCommitments(accountName: String, updatedAtMillis: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM financial_commitments WHERE id = :id")
     suspend fun deleteCommitmentById(id: Long)
@@ -165,17 +174,23 @@ interface AccountTransferDao {
     @Query("SELECT * FROM account_transfers ORDER BY timestampMillis DESC, id DESC")
     fun observeAllTransfers(): Flow<List<AccountTransferEntity>>
 
+    @Query("SELECT * FROM account_transfers WHERE isDemo = 0 ORDER BY timestampMillis DESC, id DESC")
+    suspend fun getNonDemoTransfers(): List<AccountTransferEntity>
+
+    @Query("SELECT * FROM account_transfers WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getByRemoteId(remoteId: String): AccountTransferEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransfer(transfer: AccountTransferEntity): Long
 
     @Update
     suspend fun updateTransfer(transfer: AccountTransferEntity)
 
-    @Query("UPDATE account_transfers SET fromAccountName = :newName WHERE LOWER(TRIM(fromAccountName)) = LOWER(TRIM(:oldName))")
-    suspend fun renameFromAccount(oldName: String, newName: String)
+    @Query("UPDATE account_transfers SET fromAccountName = :newName, updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(fromAccountName)) = LOWER(TRIM(:oldName))")
+    suspend fun renameFromAccount(oldName: String, newName: String, updatedAtMillis: Long = System.currentTimeMillis())
 
-    @Query("UPDATE account_transfers SET toAccountName = :newName WHERE LOWER(TRIM(toAccountName)) = LOWER(TRIM(:oldName))")
-    suspend fun renameToAccount(oldName: String, newName: String)
+    @Query("UPDATE account_transfers SET toAccountName = :newName, updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(toAccountName)) = LOWER(TRIM(:oldName))")
+    suspend fun renameToAccount(oldName: String, newName: String, updatedAtMillis: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM account_transfers WHERE id = :id")
     suspend fun deleteTransferById(id: Long)
@@ -198,6 +213,12 @@ interface PointsAccountDao {
     @Query("SELECT * FROM points_accounts WHERE id = :id LIMIT 1")
     suspend fun getPointsAccountById(id: Long): PointsAccountEntity?
 
+    @Query("SELECT * FROM points_accounts WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getByRemoteId(remoteId: String): PointsAccountEntity?
+
+    @Query("SELECT * FROM points_accounts WHERE isDemo = 0 ORDER BY updatedAtMillis DESC, id ASC")
+    suspend fun getNonDemoPointsAccounts(): List<PointsAccountEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPointsAccount(account: PointsAccountEntity): Long
 
@@ -209,4 +230,34 @@ interface PointsAccountDao {
 
     @Query("DELETE FROM points_accounts WHERE isDemo = 1")
     suspend fun deleteDemoPointsAccounts()
+}
+
+@Dao
+interface AccountDepositDao {
+    @Query("SELECT * FROM account_deposits ORDER BY timestampMillis DESC, id DESC")
+    fun observeAllDeposits(): Flow<List<AccountDepositEntity>>
+
+    @Query("SELECT * FROM account_deposits WHERE isDemo = 0 ORDER BY timestampMillis DESC, id DESC")
+    suspend fun getNonDemoDeposits(): List<AccountDepositEntity>
+
+    @Query("SELECT * FROM account_deposits WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getByRemoteId(remoteId: String): AccountDepositEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDeposit(deposit: AccountDepositEntity): Long
+
+    @Update
+    suspend fun updateDeposit(deposit: AccountDepositEntity)
+
+    @Query("UPDATE account_deposits SET accountName = :newName, updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:oldName))")
+    suspend fun renameAccountDeposits(oldName: String, newName: String, updatedAtMillis: Long = System.currentTimeMillis())
+
+    @Query("UPDATE account_deposits SET accountName = '', updatedAtMillis = :updatedAtMillis WHERE LOWER(TRIM(accountName)) = LOWER(TRIM(:accountName))")
+    suspend fun clearAccountFromDeposits(accountName: String, updatedAtMillis: Long = System.currentTimeMillis())
+
+    @Query("DELETE FROM account_deposits WHERE id = :id")
+    suspend fun deleteDepositById(id: Long)
+
+    @Query("DELETE FROM account_deposits WHERE isDemo = 1")
+    suspend fun deleteDemoDeposits()
 }

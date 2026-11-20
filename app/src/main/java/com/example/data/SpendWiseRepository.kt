@@ -1,6 +1,7 @@
 package com.example.data
 
 import android.content.Context
+import android.util.Log
 import com.example.model.BankMessageParser
 import com.example.model.CategorizationResult
 import com.example.model.CommitmentScheduleHelper
@@ -15,7 +16,11 @@ import com.example.notifications.BudgetAlertEvent
 import com.example.notifications.BudgetNotificationHelper
 import com.example.util.DateUtils
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 sealed class BankMessageProcessOutcome {
     data object Ignored : BankMessageProcessOutcome()
@@ -34,16 +39,33 @@ class SpendWiseRepository(
     private val detectedTransactionDao: DetectedTransactionDao,
     private val preferencesRepository: BudgetPreferencesRepository,
     private val notificationHelper: BudgetNotificationHelper,
-    private val syncClient: AppsScriptSyncClient = AppsScriptSyncClient()
+    private val syncClient: AppsScriptSyncClient = AppsScriptSyncClient(),
+    private val accountDepositDao: AccountDepositDao? = null
 ) {
     val allExpenses: Flow<List<ExpenseEntity>> = expenseDao.observeAllExpenses()
     val categoryBudgets: Flow<List<CategoryBudgetEntity>> = categoryBudgetDao.observeAllCategoryBudgets()
     val allAccounts: Flow<List<AccountEntity>> = accountDao.observeAllAccounts()
     val allTransfers: Flow<List<AccountTransferEntity>> = accountTransferDao.observeAllTransfers()
+    val allDeposits: Flow<List<AccountDepositEntity>> =
+        accountDepositDao?.observeAllDeposits() ?: kotlinx.coroutines.flow.flowOf(emptyList())
     val allPointsAccounts: Flow<List<PointsAccountEntity>> = pointsAccountDao.observeAllPointsAccounts()
     val allCommitments: Flow<List<CommitmentEntity>> = commitmentDao.observeAllCommitments()
     val pendingDetectedTransactions: Flow<List<DetectedTransactionEntity>> = detectedTransactionDao.observePendingDetected()
     val preferences: Flow<BudgetPreferences> = preferencesRepository.preferencesFlow
+
+    private val requestIdCounter = AtomicLong(0L)
+    private val activeRequestQueue = MutableStateFlow<List<Pair<Long, String>>>(emptyList())
+    val activeRequestMessage: Flow<String?> = activeRequestQueue.map { it.lastOrNull()?.second }
+
+    private suspend fun <T> withActiveRequest(message: String, block: suspend () -> T): T {
+        val id = requestIdCounter.incrementAndGet()
+        activeRequestQueue.update { it + (id to message) }
+        return try {
+            block()
+        } finally {
+            activeRequestQueue.update { list -> list.filterNot { it.first == id } }
+        }
+    }
 
     companion object {
         fun create(context: Context): SpendWiseRepository {
@@ -58,7 +80,8 @@ class SpendWiseRepository(
                 commitmentDao = db.commitmentDao(),
                 detectedTransactionDao = db.detectedTransactionDao(),
                 preferencesRepository = BudgetPreferencesRepository(appCtx),
-                notificationHelper = BudgetNotificationHelper(appCtx)
+                notificationHelper = BudgetNotificationHelper(appCtx),
+                accountDepositDao = db.accountDepositDao()
             )
         }
     }
@@ -75,6 +98,32 @@ class SpendWiseRepository(
         )
     }
 
+    private suspend fun triggerAutoSyncIfEnabled() {
+        val prefs = preferencesRepository.getCurrentPreferences()
+        if (prefs.isSheetConnected && prefs.autoSyncEnabled && !prefs.isDemoMode) {
+            syncWithGoogleSheet()
+        }
+    }
+
+    private suspend fun deleteRemoteRecordIfAutoSync(
+        recordType: String,
+        remoteId: String,
+        isDemo: Boolean = false
+    ) {
+        if (isDemo || remoteId.isBlank()) return
+        val prefs = preferencesRepository.getCurrentPreferences()
+        if (prefs.isSheetConnected && prefs.autoSyncEnabled && !prefs.isDemoMode) {
+            withActiveRequest("Updating Google Sheet...") {
+                syncClient.deleteRemoteRecord(
+                    scriptUrl = prefs.appsScriptUrl,
+                    token = prefs.appsScriptToken,
+                    recordType = recordType,
+                    remoteId = remoteId
+                )
+            }
+        }
+    }
+
     suspend fun saveExpense(
         existingId: Long? = null,
         existingRemoteId: String? = null,
@@ -87,14 +136,21 @@ class SpendWiseRepository(
         note: String,
         wasAutoCategorized: Boolean
     ): List<BudgetAlertEvent> {
+        val now = System.currentTimeMillis()
         val trimmedAccount = accountName.trim()
         val matchedAccount = if (trimmedAccount.isNotBlank()) {
             ensureAccountExists(trimmedAccount)
         } else ""
 
+        val resolvedRemoteId = existingRemoteId?.takeIf { it.isNotBlank() }
+            ?: existingId?.takeIf { it > 0L }?.let { id ->
+                expenseDao.getNonDemoExpenses().firstOrNull { it.id == id }?.remoteId
+            }
+            ?: UUID.randomUUID().toString()
+
         val entity = ExpenseEntity(
             id = existingId ?: 0L,
-            remoteId = existingRemoteId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
+            remoteId = resolvedRemoteId,
             description = description.trim().ifBlank { category.displayName },
             amountCents = amountCents,
             category = category.name,
@@ -103,7 +159,8 @@ class SpendWiseRepository(
             timestampMillis = timestampMillis,
             note = note.trim(),
             wasAutoCategorized = wasAutoCategorized,
-            isDemo = false
+            isDemo = false,
+            updatedAtMillis = now
         )
         if (existingId != null && existingId > 0L) {
             expenseDao.updateExpense(entity)
@@ -111,11 +168,7 @@ class SpendWiseRepository(
             expenseDao.insertExpense(entity)
         }
         val alerts = evaluateAndNotifyBudgets(category)
-
-        val prefs = preferencesRepository.getCurrentPreferences()
-        if (prefs.isSheetConnected && prefs.autoSyncEnabled && !prefs.isDemoMode) {
-            syncWithGoogleSheet()
-        }
+        triggerAutoSyncIfEnabled()
         return alerts
     }
 
@@ -128,7 +181,7 @@ class SpendWiseRepository(
         if (cleanName.isBlank()) {
             return Result.failure(IllegalArgumentException("Please enter an account name."))
         }
-
+        val now = System.currentTimeMillis()
         val duplicate = accountDao.getAccountByNameIgnoreCase(cleanName)
         if (existingId != null && existingId > 0L) {
             val current = accountDao.getAccountById(existingId)
@@ -137,35 +190,47 @@ class SpendWiseRepository(
                 return Result.failure(IllegalArgumentException("An account named \"$cleanName\" already exists."))
             }
             if (!current.name.equals(cleanName, ignoreCase = false)) {
-                expenseDao.renameAccountExpenses(current.name, cleanName)
-                commitmentDao.renameAccountCommitments(current.name, cleanName)
-                accountTransferDao.renameFromAccount(current.name, cleanName)
-                accountTransferDao.renameToAccount(current.name, cleanName)
+                expenseDao.renameAccountExpenses(current.name, cleanName, now)
+                commitmentDao.renameAccountCommitments(current.name, cleanName, now)
+                accountTransferDao.renameFromAccount(current.name, cleanName, now)
+                accountTransferDao.renameToAccount(current.name, cleanName, now)
+                accountDepositDao?.renameAccountDeposits(current.name, cleanName, now)
             }
             val updated = current.copy(
+                remoteId = current.remoteId.ifBlank { UUID.randomUUID().toString() },
                 name = cleanName,
-                initialBalanceCents = initialBalanceCents.coerceAtLeast(0L)
+                initialBalanceCents = initialBalanceCents.coerceAtLeast(0L),
+                updatedAtMillis = now
             )
             accountDao.updateAccount(updated)
+            triggerAutoSyncIfEnabled()
             return Result.success(updated)
         } else {
             if (duplicate != null) {
                 return Result.failure(IllegalArgumentException("An account named \"${duplicate.name}\" already exists."))
             }
             val created = AccountEntity(
+                remoteId = UUID.randomUUID().toString(),
                 name = cleanName,
                 initialBalanceCents = initialBalanceCents.coerceAtLeast(0L),
+                createdAtMillis = now,
+                updatedAtMillis = now,
                 isDemo = false
             )
             val newId = accountDao.insertAccount(created)
+            triggerAutoSyncIfEnabled()
             return Result.success(created.copy(id = newId))
         }
     }
 
     suspend fun deleteAccount(account: AccountEntity) {
+        val now = System.currentTimeMillis()
         accountDao.deleteAccountById(account.id)
-        expenseDao.clearAccountFromExpenses(account.name)
-        commitmentDao.clearAccountFromCommitments(account.name)
+        expenseDao.clearAccountFromExpenses(account.name, now)
+        commitmentDao.clearAccountFromCommitments(account.name, now)
+        accountDepositDao?.clearAccountFromDeposits(account.name, now)
+        deleteRemoteRecordIfAutoSync("account", account.remoteId, account.isDemo)
+        triggerAutoSyncIfEnabled()
     }
 
     suspend fun saveAccountTransfer(
@@ -191,34 +256,116 @@ class SpendWiseRepository(
             return Result.failure(IllegalArgumentException("Please enter a transfer amount greater than 0."))
         }
 
+        val now = System.currentTimeMillis()
         val resolvedFrom = ensureAccountExists(fromClean)
         val resolvedTo = ensureAccountExists(toClean)
+        val existingRemoteId = existingId?.takeIf { it > 0L }?.let { id ->
+            accountTransferDao.getNonDemoTransfers().firstOrNull { it.id == id }?.remoteId
+        }
 
         val entity = AccountTransferEntity(
             id = existingId ?: 0L,
+            remoteId = existingRemoteId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
             fromAccountName = resolvedFrom,
             toAccountName = resolvedTo,
             amountCents = amountCents,
             timestampMillis = timestampMillis,
             note = note.trim(),
-            isDemo = false
+            isDemo = false,
+            updatedAtMillis = now
         )
 
-        return if (existingId != null && existingId > 0L) {
+        val saved = if (existingId != null && existingId > 0L) {
             accountTransferDao.updateTransfer(entity)
-            Result.success(entity)
+            entity
         } else {
             val id = accountTransferDao.insertTransfer(entity)
-            Result.success(entity.copy(id = id))
+            entity.copy(id = id)
         }
+        triggerAutoSyncIfEnabled()
+        return Result.success(saved)
     }
 
     suspend fun deleteAccountTransfer(transfer: AccountTransferEntity) {
         accountTransferDao.deleteTransferById(transfer.id)
+        deleteRemoteRecordIfAutoSync("transfer", transfer.remoteId, transfer.isDemo)
     }
 
     suspend fun restoreAccountTransfer(transfer: AccountTransferEntity) {
-        accountTransferDao.insertTransfer(transfer.copy(id = 0L))
+        accountTransferDao.insertTransfer(
+            transfer.copy(
+                id = 0L,
+                remoteId = transfer.remoteId.ifBlank { UUID.randomUUID().toString() },
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        if (!transfer.isDemo) triggerAutoSyncIfEnabled()
+    }
+
+    suspend fun saveAccountDeposit(
+        existingId: Long? = null,
+        accountName: String,
+        source: String,
+        amountCents: Long,
+        timestampMillis: Long,
+        note: String
+    ): Result<AccountDepositEntity> {
+        val dao = accountDepositDao
+            ?: return Result.failure(IllegalStateException("Account deposits storage is unavailable."))
+        val cleanAccount = accountName.trim()
+        val cleanSource = source.trim()
+        if (cleanAccount.isBlank()) {
+            return Result.failure(IllegalArgumentException("Please choose or enter a destination account."))
+        }
+        if (cleanSource.isBlank()) {
+            return Result.failure(IllegalArgumentException("Please describe where this money is coming from."))
+        }
+        if (amountCents <= 0L) {
+            return Result.failure(IllegalArgumentException("Please enter an amount greater than 0."))
+        }
+
+        val now = System.currentTimeMillis()
+        val resolvedAccount = ensureAccountExists(cleanAccount)
+        val existingRemoteId = existingId?.takeIf { it > 0L }?.let { id ->
+            dao.getNonDemoDeposits().firstOrNull { it.id == id }?.remoteId
+        }
+        val entity = AccountDepositEntity(
+            id = existingId ?: 0L,
+            remoteId = existingRemoteId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
+            accountName = resolvedAccount,
+            source = cleanSource,
+            amountCents = amountCents,
+            timestampMillis = timestampMillis,
+            note = note.trim(),
+            isDemo = false,
+            updatedAtMillis = now
+        )
+
+        val saved = if (existingId != null && existingId > 0L) {
+            dao.updateDeposit(entity)
+            entity
+        } else {
+            val id = dao.insertDeposit(entity)
+            entity.copy(id = id)
+        }
+        triggerAutoSyncIfEnabled()
+        return Result.success(saved)
+    }
+
+    suspend fun deleteAccountDeposit(deposit: AccountDepositEntity) {
+        accountDepositDao?.deleteDepositById(deposit.id)
+        deleteRemoteRecordIfAutoSync("deposit", deposit.remoteId, deposit.isDemo)
+    }
+
+    suspend fun restoreAccountDeposit(deposit: AccountDepositEntity) {
+        accountDepositDao?.insertDeposit(
+            deposit.copy(
+                id = 0L,
+                remoteId = deposit.remoteId.ifBlank { UUID.randomUUID().toString() },
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        if (!deposit.isDemo) triggerAutoSyncIfEnabled()
     }
 
     suspend fun savePointsAccount(
@@ -246,6 +393,7 @@ class SpendWiseRepository(
                 return Result.failure(IllegalArgumentException("A points tracker named \"$cleanName\" already exists."))
             }
             val updated = current.copy(
+                remoteId = current.remoteId.ifBlank { UUID.randomUUID().toString() },
                 name = cleanName,
                 pointsBalance = safePoints,
                 unitLabel = cleanUnit,
@@ -254,12 +402,14 @@ class SpendWiseRepository(
                 updatedAtMillis = now
             )
             pointsAccountDao.updatePointsAccount(updated)
+            triggerAutoSyncIfEnabled()
             return Result.success(updated)
         } else {
             if (duplicate != null) {
                 return Result.failure(IllegalArgumentException("A points tracker named \"${duplicate.name}\" already exists."))
             }
             val created = PointsAccountEntity(
+                remoteId = UUID.randomUUID().toString(),
                 name = cleanName,
                 pointsBalance = safePoints,
                 unitLabel = cleanUnit,
@@ -270,6 +420,7 @@ class SpendWiseRepository(
                 isDemo = false
             )
             val id = pointsAccountDao.insertPointsAccount(created)
+            triggerAutoSyncIfEnabled()
             return Result.success(created.copy(id = id))
         }
     }
@@ -280,19 +431,29 @@ class SpendWiseRepository(
     ): PointsAccountEntity {
         val nextPoints = (account.pointsBalance + deltaPoints).coerceAtLeast(0L)
         val updated = account.copy(
+            remoteId = account.remoteId.ifBlank { UUID.randomUUID().toString() },
             pointsBalance = nextPoints,
             updatedAtMillis = System.currentTimeMillis()
         )
         pointsAccountDao.updatePointsAccount(updated)
+        triggerAutoSyncIfEnabled()
         return updated
     }
 
     suspend fun deletePointsAccount(account: PointsAccountEntity) {
         pointsAccountDao.deletePointsAccountById(account.id)
+        deleteRemoteRecordIfAutoSync("points", account.remoteId, account.isDemo)
     }
 
     suspend fun restorePointsAccount(account: PointsAccountEntity) {
-        pointsAccountDao.insertPointsAccount(account.copy(id = 0L))
+        pointsAccountDao.insertPointsAccount(
+            account.copy(
+                id = 0L,
+                remoteId = account.remoteId.ifBlank { UUID.randomUUID().toString() },
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        if (!account.isDemo) triggerAutoSyncIfEnabled()
     }
 
     suspend fun saveCommitment(
@@ -321,6 +482,7 @@ class SpendWiseRepository(
             return Result.failure(IllegalArgumentException("Please enter an amount greater than 0."))
         }
 
+        val now = System.currentTimeMillis()
         val trimmedAccount = accountName.trim()
         val resolvedAccount = if (trimmedAccount.isNotBlank()) {
             ensureAccountExists(trimmedAccount)
@@ -329,6 +491,7 @@ class SpendWiseRepository(
         val existing = existingId?.takeIf { it > 0L }?.let { commitmentDao.getCommitmentById(it) }
         val entity = CommitmentEntity(
             id = existing?.id ?: 0L,
+            remoteId = existing?.remoteId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
             title = cleanTitle,
             type = type.name,
             amountCents = amountCents,
@@ -348,24 +511,35 @@ class SpendWiseRepository(
             reminderEnabled = reminderEnabled,
             isActive = existing?.isActive ?: true,
             lastCompletedCycleKey = existing?.lastCompletedCycleKey.orEmpty(),
-            createdAtMillis = existing?.createdAtMillis ?: System.currentTimeMillis()
+            createdAtMillis = existing?.createdAtMillis ?: now,
+            updatedAtMillis = now
         )
 
-        return if (existing != null) {
+        val saved = if (existing != null) {
             commitmentDao.updateCommitment(entity)
-            Result.success(entity)
+            entity
         } else {
             val id = commitmentDao.insertCommitment(entity)
-            Result.success(entity.copy(id = id))
+            entity.copy(id = id)
         }
+        triggerAutoSyncIfEnabled()
+        return Result.success(saved)
     }
 
     suspend fun deleteCommitment(commitment: CommitmentEntity) {
         commitmentDao.deleteCommitmentById(commitment.id)
+        deleteRemoteRecordIfAutoSync("commitment", commitment.remoteId)
     }
 
     suspend fun toggleCommitmentActive(commitment: CommitmentEntity) {
-        commitmentDao.updateCommitment(commitment.copy(isActive = !commitment.isActive))
+        commitmentDao.updateCommitment(
+            commitment.copy(
+                remoteId = commitment.remoteId.ifBlank { UUID.randomUUID().toString() },
+                isActive = !commitment.isActive,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        triggerAutoSyncIfEnabled()
     }
 
     suspend fun recordCommitmentPayment(
@@ -387,13 +561,16 @@ class SpendWiseRepository(
 
         commitmentDao.updateCommitment(
             commitment.copy(
+                remoteId = commitment.remoteId.ifBlank { UUID.randomUUID().toString() },
                 progressCents = nextProgress,
                 completedInstallments = nextInstallments,
-                lastCompletedCycleKey = status.cycleKey
+                lastCompletedCycleKey = status.cycleKey,
+                updatedAtMillis = now
             )
         )
 
         if (!logAsExpense) {
+            triggerAutoSyncIfEnabled()
             return emptyList()
         }
 
@@ -423,10 +600,14 @@ class SpendWiseRepository(
         return if (existing != null) {
             existing.name
         } else {
+            val now = System.currentTimeMillis()
             accountDao.insertAccount(
                 AccountEntity(
+                    remoteId = UUID.randomUUID().toString(),
                     name = clean,
                     initialBalanceCents = 0L,
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
                     isDemo = isDemo
                 )
             )
@@ -435,41 +616,41 @@ class SpendWiseRepository(
     }
 
     suspend fun restoreExpense(expense: ExpenseEntity) {
-        expenseDao.insertExpense(expense.copy(id = 0L))
-        val prefs = preferencesRepository.getCurrentPreferences()
-        if (prefs.isSheetConnected && prefs.autoSyncEnabled && !expense.isDemo && !prefs.isDemoMode) {
-            syncWithGoogleSheet()
-        }
+        expenseDao.insertExpense(
+            expense.copy(
+                id = 0L,
+                remoteId = expense.remoteId.ifBlank { UUID.randomUUID().toString() },
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        if (!expense.isDemo) triggerAutoSyncIfEnabled()
     }
 
     suspend fun deleteExpense(expense: ExpenseEntity) {
         expenseDao.deleteExpenseById(expense.id)
-        val prefs = preferencesRepository.getCurrentPreferences()
-        if (prefs.isSheetConnected && prefs.autoSyncEnabled && !expense.isDemo && expense.remoteId.isNotBlank()) {
-            syncClient.deleteRemoteExpense(prefs.appsScriptUrl, prefs.appsScriptToken, expense.remoteId)
-        }
+        deleteRemoteRecordIfAutoSync("expense", expense.remoteId, expense.isDemo)
     }
 
     suspend fun setCategoryBudget(category: ExpenseCategory, monthlyLimitCents: Long) {
         if (monthlyLimitCents <= 0L) {
             categoryBudgetDao.deleteBudget(category.name)
+            deleteRemoteRecordIfAutoSync("budget", category.name)
         } else {
             categoryBudgetDao.upsertBudget(
                 CategoryBudgetEntity(
                     category = category.name,
                     monthlyLimitCents = monthlyLimitCents,
                     alert80SentMonth = "",
-                    alert100SentMonth = ""
+                    alert100SentMonth = "",
+                    updatedAtMillis = System.currentTimeMillis()
                 )
             )
-        }
-        val prefs = preferencesRepository.getCurrentPreferences()
-        if (prefs.isSheetConnected && prefs.autoSyncEnabled && !prefs.isDemoMode) {
-            syncWithGoogleSheet()
+            triggerAutoSyncIfEnabled()
         }
     }
 
     suspend fun applySuggestedCategoryBudgets() {
+        val now = System.currentTimeMillis()
         val budgets = listOf(
             ExpenseCategory.GROCERIES,
             ExpenseCategory.FOOD_DINING,
@@ -480,10 +661,12 @@ class SpendWiseRepository(
         ).map { cat ->
             CategoryBudgetEntity(
                 category = cat.name,
-                monthlyLimitCents = cat.suggestedMonthlyCents
+                monthlyLimitCents = cat.suggestedMonthlyCents,
+                updatedAtMillis = now
             )
         }
         categoryBudgetDao.upsertBudgets(budgets)
+        triggerAutoSyncIfEnabled()
     }
 
     suspend fun setDemoModeEnabled(enabled: Boolean) {
@@ -499,6 +682,7 @@ class SpendWiseRepository(
             expenseDao.deleteDemoExpenses()
             accountDao.deleteDemoAccounts()
             accountTransferDao.deleteDemoTransfers()
+            accountDepositDao?.deleteDemoDeposits()
             pointsAccountDao.deleteDemoPointsAccounts()
             preferencesRepository.setDemoMode(false)
         }
@@ -508,12 +692,79 @@ class SpendWiseRepository(
         if (!syncClient.isValidAppsScriptUrl(url)) {
             return Result.failure(IllegalArgumentException("Please enter a valid HTTPS Apps Script Web App URL."))
         }
-        return syncClient.ping(url, token)
+        return withActiveRequest("Testing Google Sheet connection...") {
+            syncClient.ping(url, token)
+        }
     }
 
     suspend fun saveAppsScriptConfig(url: String, token: String, autoSync: Boolean) {
         preferencesRepository.updateAppsScriptConfig(url, token, autoSync)
     }
+
+    private suspend fun ensureRemoteIdsPopulated(): SyncLocalSnapshot {
+        val expenses = expenseDao.getNonDemoExpenses().map { exp ->
+            if (exp.remoteId.isBlank()) {
+                val fixed = exp.copy(remoteId = UUID.randomUUID().toString())
+                expenseDao.updateExpense(fixed)
+                fixed
+            } else exp
+        }
+        val accounts = accountDao.getNonDemoAccounts().map { acct ->
+            if (acct.remoteId.isBlank()) {
+                val fixed = acct.copy(remoteId = UUID.randomUUID().toString())
+                accountDao.updateAccount(fixed)
+                fixed
+            } else acct
+        }
+        val deposits = accountDepositDao?.getNonDemoDeposits()?.map { dep ->
+            if (dep.remoteId.isBlank()) {
+                val fixed = dep.copy(remoteId = UUID.randomUUID().toString())
+                accountDepositDao.updateDeposit(fixed)
+                fixed
+            } else dep
+        }.orEmpty()
+        val transfers = accountTransferDao.getNonDemoTransfers().map { tr ->
+            if (tr.remoteId.isBlank()) {
+                val fixed = tr.copy(remoteId = UUID.randomUUID().toString())
+                accountTransferDao.updateTransfer(fixed)
+                fixed
+            } else tr
+        }
+        val commitments = commitmentDao.getAllCommitmentsOnce().map { c ->
+            if (c.remoteId.isBlank()) {
+                val fixed = c.copy(remoteId = UUID.randomUUID().toString())
+                commitmentDao.updateCommitment(fixed)
+                fixed
+            } else c
+        }
+        val pointsAccounts = pointsAccountDao.getNonDemoPointsAccounts().map { p ->
+            if (p.remoteId.isBlank()) {
+                val fixed = p.copy(remoteId = UUID.randomUUID().toString())
+                pointsAccountDao.updatePointsAccount(fixed)
+                fixed
+            } else p
+        }
+        val budgets = categoryBudgetDao.getAllCategoryBudgetsOnce()
+        return SyncLocalSnapshot(
+            expenses = expenses,
+            budgets = budgets,
+            accounts = accounts,
+            deposits = deposits,
+            transfers = transfers,
+            commitments = commitments,
+            pointsAccounts = pointsAccounts
+        )
+    }
+
+    private data class SyncLocalSnapshot(
+        val expenses: List<ExpenseEntity>,
+        val budgets: List<CategoryBudgetEntity>,
+        val accounts: List<AccountEntity>,
+        val deposits: List<AccountDepositEntity>,
+        val transfers: List<AccountTransferEntity>,
+        val commitments: List<CommitmentEntity>,
+        val pointsAccounts: List<PointsAccountEntity>
+    )
 
     suspend fun syncWithGoogleSheet(): Result<String> {
         val prefs = preferencesRepository.getCurrentPreferences()
@@ -521,72 +772,350 @@ class SpendWiseRepository(
             return Result.failure(IllegalStateException("No Google Apps Script URL configured."))
         }
 
-        val localExpenses = expenseDao.getNonDemoExpenses()
-        val localBudgets = categoryBudgetDao.getAllCategoryBudgetsOnce()
+        return withActiveRequest("Syncing with Google Sheet...") {
+            val snapshot = ensureRemoteIdsPopulated()
 
-        val result = syncClient.syncAll(
-            scriptUrl = prefs.appsScriptUrl,
-            token = prefs.appsScriptToken,
-            localExpenses = localExpenses,
-            localBudgets = localBudgets
-        )
+            val result = syncClient.syncAll(
+                scriptUrl = prefs.appsScriptUrl,
+                token = prefs.appsScriptToken,
+                localExpenses = snapshot.expenses,
+                localBudgets = snapshot.budgets,
+                localAccounts = snapshot.accounts,
+                localDeposits = snapshot.deposits,
+                localTransfers = snapshot.transfers,
+                localCommitments = snapshot.commitments,
+                localPointsAccounts = snapshot.pointsAccounts,
+                localSettings = prefs
+            )
 
-        return result.fold(
+            result.fold(
             onSuccess = { syncResult ->
-                // Upsert remote expenses that don't yet exist locally
+                // 1. Merge Custom Accounts first so expenses/deposits/transfers/plans link cleanly
+                for (remote in syncResult.remoteAccounts) {
+                    val byRemote = accountDao.getAccountByRemoteId(remote.remoteId)
+                    val byName = if (byRemote == null) accountDao.getAccountByNameIgnoreCase(remote.name) else null
+                    val existing = byRemote ?: byName
+                    if (existing == null) {
+                        accountDao.insertAccount(
+                            AccountEntity(
+                                remoteId = remote.remoteId,
+                                name = remote.name,
+                                initialBalanceCents = remote.initialBalanceCents.coerceAtLeast(0L),
+                                createdAtMillis = remote.createdAtMillis,
+                                updatedAtMillis = remote.updatedAtMillis,
+                                isDemo = false
+                            )
+                        )
+                    } else if (existing.remoteId != remote.remoteId ||
+                        (remote.updatedAtMillis >= existing.updatedAtMillis &&
+                            (existing.name != remote.name ||
+                                existing.initialBalanceCents != remote.initialBalanceCents))
+                    ) {
+                        val shouldTakeRemoteValues = remote.updatedAtMillis >= existing.updatedAtMillis
+                        val targetName = if (shouldTakeRemoteValues) remote.name else existing.name
+                        if (shouldTakeRemoteValues && !existing.name.equals(remote.name, ignoreCase = false)) {
+                            expenseDao.renameAccountExpenses(existing.name, remote.name, remote.updatedAtMillis)
+                            commitmentDao.renameAccountCommitments(existing.name, remote.name, remote.updatedAtMillis)
+                            accountTransferDao.renameFromAccount(existing.name, remote.name, remote.updatedAtMillis)
+                            accountTransferDao.renameToAccount(existing.name, remote.name, remote.updatedAtMillis)
+                            accountDepositDao?.renameAccountDeposits(existing.name, remote.name, remote.updatedAtMillis)
+                        }
+                        accountDao.updateAccount(
+                            existing.copy(
+                                remoteId = remote.remoteId,
+                                name = targetName,
+                                initialBalanceCents = if (shouldTakeRemoteValues) {
+                                    remote.initialBalanceCents.coerceAtLeast(0L)
+                                } else existing.initialBalanceCents,
+                                updatedAtMillis = maxOf(existing.updatedAtMillis, remote.updatedAtMillis)
+                            )
+                        )
+                    }
+                }
+
+                // 2. Upsert remote expenses
                 for (remote in syncResult.remoteExpenses) {
                     val syncedAccount = if (remote.accountName.isNotBlank()) {
                         ensureAccountExists(remote.accountName)
                     } else ""
                     val existing = expenseDao.getByRemoteId(remote.remoteId)
+                    val normalizedCategory = ExpenseCategory.fromKey(remote.category).name
+                    val normalizedMethod = PaymentMethod.fromKey(remote.paymentMethod).name
                     if (existing == null) {
                         expenseDao.insertExpense(
                             ExpenseEntity(
                                 remoteId = remote.remoteId,
                                 description = remote.description,
                                 amountCents = remote.amountCents,
-                                category = ExpenseCategory.fromKey(remote.category).name,
-                                paymentMethod = PaymentMethod.fromKey(remote.paymentMethod).name,
+                                category = normalizedCategory,
+                                paymentMethod = normalizedMethod,
                                 accountName = syncedAccount,
                                 timestampMillis = remote.timestampMillis,
                                 note = remote.note,
                                 wasAutoCategorized = remote.wasAutoCategorized,
-                                isDemo = false
+                                isDemo = false,
+                                updatedAtMillis = remote.updatedAtMillis
                             )
                         )
-                    } else if (existing.description != remote.description ||
-                        existing.amountCents != remote.amountCents ||
-                        existing.category != remote.category ||
-                        existing.accountName != syncedAccount ||
-                        existing.note != remote.note
+                    } else if (remote.updatedAtMillis >= existing.updatedAtMillis &&
+                        (existing.description != remote.description ||
+                            existing.amountCents != remote.amountCents ||
+                            existing.category != normalizedCategory ||
+                            existing.paymentMethod != normalizedMethod ||
+                            existing.accountName != syncedAccount ||
+                            existing.timestampMillis != remote.timestampMillis ||
+                            existing.note != remote.note)
                     ) {
                         expenseDao.updateExpense(
                             existing.copy(
                                 description = remote.description,
                                 amountCents = remote.amountCents,
-                                category = ExpenseCategory.fromKey(remote.category).name,
-                                paymentMethod = PaymentMethod.fromKey(remote.paymentMethod).name,
+                                category = normalizedCategory,
+                                paymentMethod = normalizedMethod,
                                 accountName = syncedAccount,
                                 timestampMillis = remote.timestampMillis,
-                                note = remote.note
+                                note = remote.note,
+                                updatedAtMillis = remote.updatedAtMillis
                             )
                         )
                     }
                 }
 
-                // Merge remote category budgets if not set locally
-                val localBudgetMap = localBudgets.associateBy { it.category }
-                val toUpsert = syncResult.remoteBudgets.mapNotNull { rb ->
+                // 3. Merge remote category budgets
+                val localBudgetMap = snapshot.budgets.associateBy { it.category }
+                val toUpsertBudgets = syncResult.remoteBudgets.mapNotNull { rb ->
                     val normalizedKey = ExpenseCategory.fromKey(rb.category).name
                     val existing = localBudgetMap[normalizedKey]
                     if (existing == null) {
-                        CategoryBudgetEntity(normalizedKey, rb.monthlyLimitCents)
-                    } else if (existing.monthlyLimitCents != rb.monthlyLimitCents) {
-                        existing.copy(monthlyLimitCents = rb.monthlyLimitCents)
+                        CategoryBudgetEntity(
+                            category = normalizedKey,
+                            monthlyLimitCents = rb.monthlyLimitCents,
+                            updatedAtMillis = rb.updatedAtMillis
+                        )
+                    } else if (rb.updatedAtMillis >= existing.updatedAtMillis &&
+                        existing.monthlyLimitCents != rb.monthlyLimitCents
+                    ) {
+                        existing.copy(
+                            monthlyLimitCents = rb.monthlyLimitCents,
+                            updatedAtMillis = rb.updatedAtMillis
+                        )
                     } else null
                 }
-                if (toUpsert.isNotEmpty()) {
-                    categoryBudgetDao.upsertBudgets(toUpsert)
+                if (toUpsertBudgets.isNotEmpty()) {
+                    categoryBudgetDao.upsertBudgets(toUpsertBudgets)
+                }
+
+                // 4. Merge Added Funds / Deposits
+                if (accountDepositDao != null) {
+                    for (remote in syncResult.remoteDeposits) {
+                        val syncedAccount = ensureAccountExists(remote.accountName)
+                        val existing = accountDepositDao.getByRemoteId(remote.remoteId)
+                        if (existing == null) {
+                            accountDepositDao.insertDeposit(
+                                AccountDepositEntity(
+                                    remoteId = remote.remoteId,
+                                    accountName = syncedAccount,
+                                    source = remote.source,
+                                    amountCents = remote.amountCents,
+                                    timestampMillis = remote.timestampMillis,
+                                    note = remote.note,
+                                    isDemo = false,
+                                    updatedAtMillis = remote.updatedAtMillis
+                                )
+                            )
+                        } else if (remote.updatedAtMillis >= existing.updatedAtMillis &&
+                            (existing.accountName != syncedAccount ||
+                                existing.source != remote.source ||
+                                existing.amountCents != remote.amountCents ||
+                                existing.timestampMillis != remote.timestampMillis ||
+                                existing.note != remote.note)
+                        ) {
+                            accountDepositDao.updateDeposit(
+                                existing.copy(
+                                    accountName = syncedAccount,
+                                    source = remote.source,
+                                    amountCents = remote.amountCents,
+                                    timestampMillis = remote.timestampMillis,
+                                    note = remote.note,
+                                    updatedAtMillis = remote.updatedAtMillis
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // 5. Merge Internal Account Transfers
+                for (remote in syncResult.remoteTransfers) {
+                    val syncedFrom = ensureAccountExists(remote.fromAccountName)
+                    val syncedTo = ensureAccountExists(remote.toAccountName)
+                    val existing = accountTransferDao.getByRemoteId(remote.remoteId)
+                    if (existing == null) {
+                        accountTransferDao.insertTransfer(
+                            AccountTransferEntity(
+                                remoteId = remote.remoteId,
+                                fromAccountName = syncedFrom,
+                                toAccountName = syncedTo,
+                                amountCents = remote.amountCents,
+                                timestampMillis = remote.timestampMillis,
+                                note = remote.note,
+                                isDemo = false,
+                                updatedAtMillis = remote.updatedAtMillis
+                            )
+                        )
+                    } else if (remote.updatedAtMillis >= existing.updatedAtMillis &&
+                        (existing.fromAccountName != syncedFrom ||
+                            existing.toAccountName != syncedTo ||
+                            existing.amountCents != remote.amountCents ||
+                            existing.timestampMillis != remote.timestampMillis ||
+                            existing.note != remote.note)
+                    ) {
+                        accountTransferDao.updateTransfer(
+                            existing.copy(
+                                fromAccountName = syncedFrom,
+                                toAccountName = syncedTo,
+                                amountCents = remote.amountCents,
+                                timestampMillis = remote.timestampMillis,
+                                note = remote.note,
+                                updatedAtMillis = remote.updatedAtMillis
+                            )
+                        )
+                    }
+                }
+
+                // 6. Merge Plans / Financial Commitments
+                for (remote in syncResult.remoteCommitments) {
+                    val syncedAccount = if (remote.accountName.isNotBlank()) {
+                        ensureAccountExists(remote.accountName)
+                    } else ""
+                    val normalizedType = CommitmentType.fromKey(remote.type).name
+                    val normalizedCycle = RecurrenceCycle.fromKey(remote.cycle).name
+                    val normalizedCat = ExpenseCategory.fromKey(remote.category).name
+                    val existing = commitmentDao.getByRemoteId(remote.remoteId)
+                    if (existing == null) {
+                        commitmentDao.insertCommitment(
+                            CommitmentEntity(
+                                remoteId = remote.remoteId,
+                                title = remote.title,
+                                type = normalizedType,
+                                amountCents = remote.amountCents,
+                                targetOrTotalCents = remote.targetOrTotalCents,
+                                progressCents = remote.progressCents,
+                                cycle = normalizedCycle,
+                                dueDayOfMonth = remote.dueDayOfMonth,
+                                statementDayOfMonth = remote.statementDayOfMonth,
+                                scheduledDateMillis = remote.scheduledDateMillis,
+                                totalInstallments = remote.totalInstallments,
+                                completedInstallments = remote.completedInstallments,
+                                accountName = syncedAccount,
+                                category = normalizedCat,
+                                note = remote.note,
+                                reminderEnabled = remote.reminderEnabled,
+                                isActive = remote.isActive,
+                                lastCompletedCycleKey = remote.lastCompletedCycleKey,
+                                createdAtMillis = remote.createdAtMillis,
+                                updatedAtMillis = remote.updatedAtMillis
+                            )
+                        )
+                    } else if (remote.updatedAtMillis >= existing.updatedAtMillis &&
+                        (existing.title != remote.title ||
+                            existing.type != normalizedType ||
+                            existing.amountCents != remote.amountCents ||
+                            existing.targetOrTotalCents != remote.targetOrTotalCents ||
+                            existing.progressCents != remote.progressCents ||
+                            existing.cycle != normalizedCycle ||
+                            existing.dueDayOfMonth != remote.dueDayOfMonth ||
+                            existing.statementDayOfMonth != remote.statementDayOfMonth ||
+                            existing.scheduledDateMillis != remote.scheduledDateMillis ||
+                            existing.totalInstallments != remote.totalInstallments ||
+                            existing.completedInstallments != remote.completedInstallments ||
+                            existing.accountName != syncedAccount ||
+                            existing.category != normalizedCat ||
+                            existing.note != remote.note ||
+                            existing.reminderEnabled != remote.reminderEnabled ||
+                            existing.isActive != remote.isActive ||
+                            existing.lastCompletedCycleKey != remote.lastCompletedCycleKey)
+                    ) {
+                        commitmentDao.updateCommitment(
+                            existing.copy(
+                                title = remote.title,
+                                type = normalizedType,
+                                amountCents = remote.amountCents,
+                                targetOrTotalCents = remote.targetOrTotalCents,
+                                progressCents = remote.progressCents,
+                                cycle = normalizedCycle,
+                                dueDayOfMonth = remote.dueDayOfMonth,
+                                statementDayOfMonth = remote.statementDayOfMonth,
+                                scheduledDateMillis = remote.scheduledDateMillis,
+                                totalInstallments = remote.totalInstallments,
+                                completedInstallments = remote.completedInstallments,
+                                accountName = syncedAccount,
+                                category = normalizedCat,
+                                note = remote.note,
+                                reminderEnabled = remote.reminderEnabled,
+                                isActive = remote.isActive,
+                                lastCompletedCycleKey = remote.lastCompletedCycleKey,
+                                updatedAtMillis = remote.updatedAtMillis
+                            )
+                        )
+                    }
+                }
+
+                // 7. Merge Points & Rewards Trackers
+                for (remote in syncResult.remotePointsAccounts) {
+                    val byRemote = pointsAccountDao.getByRemoteId(remote.remoteId)
+                    val byName = if (byRemote == null) {
+                        pointsAccountDao.getPointsAccountByNameIgnoreCase(remote.name)
+                    } else null
+                    val existing = byRemote ?: byName
+                    if (existing == null) {
+                        pointsAccountDao.insertPointsAccount(
+                            PointsAccountEntity(
+                                remoteId = remote.remoteId,
+                                name = remote.name,
+                                pointsBalance = remote.pointsBalance,
+                                unitLabel = remote.unitLabel,
+                                centsPerPointTimes100 = remote.centsPerPointTimes100,
+                                note = remote.note,
+                                updatedAtMillis = remote.updatedAtMillis,
+                                createdAtMillis = remote.createdAtMillis,
+                                isDemo = false
+                            )
+                        )
+                    } else if (existing.remoteId != remote.remoteId ||
+                        (remote.updatedAtMillis >= existing.updatedAtMillis &&
+                            (existing.name != remote.name ||
+                                existing.pointsBalance != remote.pointsBalance ||
+                                existing.unitLabel != remote.unitLabel ||
+                                existing.centsPerPointTimes100 != remote.centsPerPointTimes100 ||
+                                existing.note != remote.note))
+                    ) {
+                        val takeRemote = remote.updatedAtMillis >= existing.updatedAtMillis
+                        pointsAccountDao.updatePointsAccount(
+                            existing.copy(
+                                remoteId = remote.remoteId,
+                                name = if (takeRemote) remote.name else existing.name,
+                                pointsBalance = if (takeRemote) remote.pointsBalance else existing.pointsBalance,
+                                unitLabel = if (takeRemote) remote.unitLabel else existing.unitLabel,
+                                centsPerPointTimes100 = if (takeRemote) remote.centsPerPointTimes100 else existing.centsPerPointTimes100,
+                                note = if (takeRemote) remote.note else existing.note,
+                                updatedAtMillis = maxOf(existing.updatedAtMillis, remote.updatedAtMillis)
+                            )
+                        )
+                    }
+                }
+
+                // 8. Merge Monthly Budget Plan, Currency & Today Source Settings
+                val remoteSettings = syncResult.remoteSettings
+                if (remoteSettings != null && remoteSettings.updatedAtMillis > prefs.settingsUpdatedAtMillis) {
+                    preferencesRepository.applyRemoteSettings(
+                        monthlyBudgetCents = remoteSettings.monthlyBudgetCents,
+                        monthlySavingsGoalCents = remoteSettings.monthlySavingsGoalCents,
+                        dailyMode = DailyBudgetMode.fromKey(remoteSettings.dailyMode),
+                        fixedDailyLimitCents = remoteSettings.fixedDailyLimitCents,
+                        currencySymbol = remoteSettings.currencySymbol,
+                        todayUseAccountsBalance = remoteSettings.todayUseAccountsBalance,
+                        updatedAtMillis = remoteSettings.updatedAtMillis
+                    )
                 }
 
                 preferencesRepository.updateSyncStatus(
@@ -604,6 +1133,7 @@ class SpendWiseRepository(
                 Result.failure(error)
             }
         )
+        }
     }
 
     suspend fun updateBudgetSettings(
@@ -618,10 +1148,12 @@ class SpendWiseRepository(
             dailyMode = dailyMode,
             fixedDailyLimitCents = fixedDailyLimitCents
         )
+        triggerAutoSyncIfEnabled()
     }
 
     suspend fun updateCurrencySymbol(symbol: String) {
         preferencesRepository.updateCurrencySymbol(symbol)
+        triggerAutoSyncIfEnabled()
     }
 
     suspend fun updateNotificationsEnabled(enabled: Boolean) {
@@ -644,6 +1176,11 @@ class SpendWiseRepository(
         )
     }
 
+    suspend fun updateTodayUseAccountsBalance(useAccounts: Boolean) {
+        preferencesRepository.updateTodayUseAccountsBalance(useAccounts)
+        triggerAutoSyncIfEnabled()
+    }
+
     suspend fun processIncomingBankMessage(
         sourcePackage: String,
         sourceAppLabel: String,
@@ -651,8 +1188,10 @@ class SpendWiseRepository(
         rawBody: String,
         respectToggle: Boolean = true
     ): BankMessageProcessOutcome {
+        val logTag = "SpendWiseBankListener"
         val prefs = preferencesRepository.getCurrentPreferences()
         if (respectToggle && !prefs.bankDetectionEnabled) {
+            Log.i(logTag, "Repo outcome=Ignored reason=DETECTION_DISABLED pkg=$sourcePackage")
             return BankMessageProcessOutcome.Ignored
         }
 
@@ -668,7 +1207,21 @@ class SpendWiseRepository(
             sourceAppLabel = sourceAppLabel,
             learnedHistory = learnedHistory,
             nowMillis = now
-        ) ?: return BankMessageProcessOutcome.Ignored
+        )
+        if (parsed == null) {
+            Log.d(
+                logTag,
+                "Parser result: parsed=false pkg=$sourcePackage titleLen=${rawTitle.trim().length} bodyLen=${rawBody.trim().length}"
+            )
+            Log.i(logTag, "Repo outcome=Ignored reason=PARSER_FILTERED pkg=$sourcePackage")
+            return BankMessageProcessOutcome.Ignored
+        }
+
+        Log.d(
+            logTag,
+            "Parser result: parsed=true pkg=$sourcePackage method=${parsed.paymentMethod.name} " +
+                "confidence=${parsed.confidence.name} hasLast4=${parsed.cardLastFour.isNotBlank()}"
+        )
 
         // Deduplicate identical charge messages within a 5-minute window
         val existingCount = detectedTransactionDao.countByFingerprintSince(
@@ -676,6 +1229,7 @@ class SpendWiseRepository(
             sinceMillis = now - 300_000L
         )
         if (existingCount > 0) {
+            Log.i(logTag, "Repo outcome=Duplicate pkg=$sourcePackage")
             return BankMessageProcessOutcome.Duplicate
         }
 
@@ -722,6 +1276,7 @@ class SpendWiseRepository(
                     accountName = matchedAccount
                 )
             }
+            Log.i(logTag, "Repo outcome=AutoLogged pkg=$sourcePackage matchedAccount=${matchedAccount.isNotBlank()}")
             return BankMessageProcessOutcome.AutoLogged(savedDetected, alerts)
         } else {
             if (prefs.notificationsEnabled && respectToggle) {
@@ -734,6 +1289,7 @@ class SpendWiseRepository(
                     accountName = matchedAccount
                 )
             }
+            Log.i(logTag, "Repo outcome=QueuedForReview pkg=$sourcePackage matchedAccount=${matchedAccount.isNotBlank()}")
             return BankMessageProcessOutcome.QueuedForReview(savedDetected)
         }
     }
